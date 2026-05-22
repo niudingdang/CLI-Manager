@@ -1,5 +1,35 @@
 # Changelog
 
+## [V0.1.4] - 2026-05-22
+
+### 终端渲染修复
+
+- 修复内部终端在显示带 ANSI 颜色的 diff 日志（如 `gh run view --log` 输出的 GitHub Actions 日志）时，左侧出现红色竖条 / 背景串色的间歇性渲染异常。
+- 根因为 PTY reader 在 chunk 边界切断了 UTF-8 多字节字符或 ANSI CSI/OSC 转义序列，残字节被 xterm 解读为 SGR 参数从而污染背景色状态。
+- 后端新增 `pty::boundary::safe_emit_boundary` 字节流边界保护：emit 前回退到最近的 UTF-8 字符边界与 ANSI 序列终结点，未完成的残尾延迟到下一轮拼接；覆盖 CSI / OSC / DCS / SOS / PM / APC / 2-byte ESC / ESC + intermediate 各类序列；含 256KB 兜底防止异常源端导致内存增长。
+- 前端 `XTermTerminal` 将模块级共享 `TextDecoder` 改为 per-session 实例 + `{ stream: true }` 流式解码模式，避免跨会话状态污染；`WebglAddon` 注册 `onContextLoss` 回调，GPU 上下文丢失时自动 dispose 并回落 Canvas 渲染。
+- 新增 22 个 Rust 单元测试（含穷举所有切点的 `stress_all_split_points_reconstruct` 与 500 次随机切点的 `stress_random_split_reconstructs_original`）保证字节流契约。
+
+### 性能优化
+
+- `src-tauri/src/commands/history.rs`：历史扫描移出 async runtime，避免阻塞主调度。
+- `src/components/XTermTerminal.tsx`：削减非激活终端的 buffering，降低后台标签内存与渲染开销。
+- `src/components/HistoryWorkspace.tsx` / `src/components/history/historyViewUtils.tsx`：避免历史视图中重复的 lower-case 与搜索工作。
+- `src/components/history/DiffModal.tsx` / `src/lib/diffParser.worker.ts`：减小大 diff payload 体积。
+- `src/stores/settingsStore.ts` / `src/components/settings/pages/GeneralSettingsPage.tsx`：高频 settings 写入做节流，降低 store 持久化压力。
+- `src-tauri/src/sync/mod.rs` / `src-tauri/src/webdav/mod.rs`：收紧 sync / WebDAV 导入路径，减少 CPU 与内存占用。
+
+### 终端主题扩展
+
+- `src/lib/terminalThemes.ts` 新增 5 套终端配色：
+  - Catppuccin Mocha / Macchiato / Latte
+  - Gruvbox Dark / Light
+
+### 工程内务
+
+- 引入 Trellis 工作流脚本与 spec 目录（`.trellis/`），用于本地任务管理与代码规范沉淀。
+- `.gitignore` 收纳 `.agents/` / `.codex/` / `.xcodemap/` 本地工具目录。
+
 ## [V0.1.3] - 2026-05-22
 
 ### 精简模式与终端输入修复
