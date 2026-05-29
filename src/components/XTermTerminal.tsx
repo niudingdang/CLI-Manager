@@ -239,8 +239,7 @@ export function XTermTerminal({ sessionId, isActive = true, fontSize = 14, fontF
         e.preventDefault();
         navigator.clipboard.readText().then((text) => {
           if (text) {
-            invoke("pty_write", { sessionId, data: text }).catch((err) => reportPtyWriteError("paste", err));
-            inputBuffer.current += text;
+            terminal.paste(text);
           }
         }).catch((err) => {
           logError("Failed to read clipboard text", { sessionId, err });
