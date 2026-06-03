@@ -1,9 +1,11 @@
 ﻿import { Select } from "@/components/ui/select";
-import { RefreshCw, Search, Star } from "lucide-react";
+import { RefreshCw, Search, Star, Trash2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, RefObject } from "react";
-import type { HistorySearchHit, HistorySessionView, HistorySourceFilter } from "../../lib/types";
+import type { HistorySearchHit, HistorySessionView, HistorySourceFilter, Project } from "../../lib/types";
 import { SearchHitsPanel } from "./SearchHitsPanel";
 import { formatTime, makeSessionLabel } from "./historyViewUtils";
+
+const ALL_PROJECTS_SELECT_VALUE = "__all_projects__";
 
 interface SessionGroup {
   label: string;
@@ -15,6 +17,8 @@ interface HistoryListPaneProps {
   sidebarRef: RefObject<HTMLElement | null>;
   sessionListRef: RefObject<HTMLDivElement | null>;
   sourceFilter: HistorySourceFilter;
+  projectPathFilter: string | null;
+  projects: Project[];
   globalQuery: string;
   activeSessionKey: string | null;
   loadingSessions: boolean;
@@ -28,11 +32,12 @@ interface HistoryListPaneProps {
   visibleSessionCount: number;
   searchHits: HistorySearchHit[];
   globalSearchRef: RefObject<HTMLInputElement | null>;
-  onClose: () => void;
   onRefresh: () => void;
   onSourceFilterChange: (value: HistorySourceFilter) => void;
+  onProjectPathFilterChange: (value: string | null) => void;
   onGlobalQueryChange: (value: string) => void;
   onOpenSession: (sessionKey: string) => void;
+  onDeleteSession: (session: HistorySessionView) => void;
   onOpenHit: (hit: HistorySearchHit) => void;
   onLoadMoreSessions: () => void;
   onSessionListScroll: () => void;
@@ -44,6 +49,8 @@ export function HistoryListPane({
   sidebarRef,
   sessionListRef,
   sourceFilter,
+  projectPathFilter,
+  projects,
   globalQuery,
   activeSessionKey,
   loadingSessions,
@@ -57,11 +64,12 @@ export function HistoryListPane({
   visibleSessionCount,
   searchHits,
   globalSearchRef,
-  onClose,
   onRefresh,
   onSourceFilterChange,
+  onProjectPathFilterChange,
   onGlobalQueryChange,
   onOpenSession,
+  onDeleteSession,
   onOpenHit,
   onLoadMoreSessions,
   onSessionListScroll,
@@ -75,14 +83,6 @@ export function HistoryListPane({
     >
       <div className="ui-history-sidebar-top p-3">
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={onClose}
-            aria-label="关闭历史会话面板"
-            className="ui-flat-action ui-toolbar-button ui-toolbar-button-compact shrink-0"
-          >
-            关闭
-          </button>
-
           <Select
             className="h-8 shrink-0 text-[12px]"
             value={sourceFilter}
@@ -92,6 +92,23 @@ export function HistoryListPane({
             <option value="all">全部来源</option>
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
+          </Select>
+
+          <Select
+            className="h-8 min-w-[120px] shrink-0 text-[12px]"
+            value={projectPathFilter ?? ALL_PROJECTS_SELECT_VALUE}
+            onChange={(e) => {
+              const nextValue = e.target.value;
+              onProjectPathFilterChange(nextValue === ALL_PROJECTS_SELECT_VALUE ? null : nextValue);
+            }}
+            aria-label="历史项目过滤"
+          >
+            <option value={ALL_PROJECTS_SELECT_VALUE}>全部项目</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.path}>
+                {project.name}
+              </option>
+            ))}
           </Select>
 
           <button
@@ -138,21 +155,35 @@ export function HistoryListPane({
                 {group.label}
               </div>
               {group.items.map((item) => (
-                <button
+                <div
                   key={item.sessionKey}
-                  onClick={() => onOpenSession(item.sessionKey)}
-                  className="ui-list-row w-full border-b border-border px-3 py-2 text-left"
+                  className="ui-list-row flex w-full items-start gap-2 border-b border-border px-3 py-2 text-left"
                   style={{ backgroundColor: item.sessionKey === activeSessionKey ? "var(--bg-tertiary)" : "transparent" }}
                 >
-                  <div className="flex items-center gap-1.5">
-                    {item.starred && <Star size={12} style={{ color: "var(--warning)" }} fill="currentColor" />}
-                    <span className="truncate text-[13px] font-semibold text-text-primary">{item.displayTitle}</span>
-                  </div>
-                  <div className="ui-dev-label mt-1 text-[11px] text-text-muted">
-                    {item.source} · {makeSessionLabel(item)} · {item.message_count} 条消息
-                  </div>
-                  <div className="ui-dev-label mt-1 text-[11px] text-text-muted">更新于 {formatTime(item.updated_at)}</div>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSession(item.sessionKey)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      {item.starred && <Star size={12} style={{ color: "var(--warning)" }} fill="currentColor" />}
+                      <span className="truncate text-[13px] font-semibold text-text-primary">{item.displayTitle}</span>
+                    </div>
+                    <div className="ui-dev-label mt-1 text-[11px] text-text-muted">
+                      {item.source} · {makeSessionLabel(item)} · {item.message_count} 条消息
+                    </div>
+                    <div className="ui-dev-label mt-1 text-[11px] text-text-muted">更新于 {formatTime(item.updated_at)}</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteSession(item)}
+                    className="ui-flat-action mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-text-muted hover:text-danger"
+                    aria-label={`删除历史会话 ${item.displayTitle}`}
+                    title="删除历史会话"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
               ))}
             </div>
           ))}
