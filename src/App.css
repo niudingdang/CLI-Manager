@@ -1946,6 +1946,7 @@ samp,
 }
 
 .ui-terminal-pane-chrome {
+  --terminal-tab-border-green: #22c55e;
   min-height: 40px;
   margin: 0;
   border-radius: 0;
@@ -1953,6 +1954,36 @@ samp,
   color: var(--terminal-theme-foreground, #f8fafc);
   outline-color: color-mix(in srgb, var(--terminal-theme-foreground, #f8fafc) 10%, transparent);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--terminal-theme-foreground, #f8fafc) 9%, transparent);
+}
+
+.ui-terminal-pane-chrome .ui-tab-trigger {
+  border-color: color-mix(in srgb, var(--terminal-tab-border-green) 48%, transparent);
+}
+
+.ui-terminal-pane-chrome .ui-tab-trigger[data-selected="true"] {
+  border-color: var(--terminal-tab-border-green);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--terminal-tab-border-green) 72%, transparent);
+}
+
+.ui-terminal-pane-chrome .ui-terminal-actions {
+  gap: 6px;
+  padding-inline: 8px;
+  border-left: 1px solid color-mix(in srgb, var(--terminal-tab-border-green) 22%, transparent);
+}
+
+.ui-terminal-pane-chrome .ui-terminal-actions .ui-toolbar-button,
+.ui-terminal-pane-chrome .ui-terminal-actions .ui-icon-action {
+  min-height: 28px;
+  border-color: color-mix(in srgb, var(--terminal-tab-border-green) 32%, transparent);
+  background-color: color-mix(in srgb, var(--terminal-theme-background, #0c0e10) 74%, var(--terminal-theme-foreground, #f8fafc) 8%);
+  color: var(--terminal-theme-foreground, #f8fafc);
+  box-shadow: none;
+}
+
+.ui-terminal-pane-chrome .ui-terminal-actions .ui-primary-action {
+  background-image: none;
+  background-color: color-mix(in srgb, var(--terminal-tab-border-green) 24%, var(--terminal-theme-background, #0c0e10) 76%);
+  color: var(--terminal-theme-foreground, #f8fafc);
 }
 
 .ui-terminal-global-chrome {
