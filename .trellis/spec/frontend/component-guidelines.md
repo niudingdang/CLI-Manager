@@ -35,6 +35,37 @@ type SettingsTab = "general" | "terminal-settings" | "shortcuts";
 
 **Tests**: After changing settings page labels or layout, assert that existing callers can still open the page through the old `SettingsTab` literal and run `npx tsc --noEmit`.
 
+### Convention: Terminal tab drag uses overlay plus explicit pane drop zones
+
+**What**: Terminal tab drag interactions use dnd-kit `DragOverlay` for the cursor-following tab, while pane movement/splitting is driven by explicit drop ids:
+
+```typescript
+type TerminalPaneDropEdge = "left" | "right" | "top" | "bottom";
+type PaneDropTarget =
+  | { type: "center"; paneId: string }
+  | { type: "edge"; paneId: string; edge: TerminalPaneDropEdge };
+```
+
+**Why**: sortable tab transforms are optimized for in-list reordering and can visually lock a tab to the tab bar. Pane-level drop zones make center move and edge split behavior testable without guessing from DOM position after drop.
+
+**Correct**:
+
+```tsx
+<DndContext collisionDetection={terminalTabCollisionDetection}>
+  <SplitTerminalView node={paneTree} renderLeaf={renderLeaf} />
+  <DragOverlay dropAnimation={null}>{activeTabOverlay}</DragOverlay>
+</DndContext>
+```
+
+**Wrong**:
+
+```tsx
+// Do not infer pane splits from tab bar reorder transforms only.
+const horizontalTransform = transform ? { ...transform, y: 0 } : transform;
+```
+
+**Tests**: For terminal drag UI changes, run `npx tsc --noEmit` and manually verify same-pane reorder, pane-center move, and left/right/top/bottom edge split previews in the Tauri desktop app.
+
 ---
 
 ## Props Conventions

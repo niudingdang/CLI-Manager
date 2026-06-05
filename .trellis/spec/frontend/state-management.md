@@ -138,6 +138,38 @@ interface SettingsStore extends Settings {
 
 `load()` recomputes the flag every launch; it is never written to `settings.json`.
 
+### Pattern: Pane tree drag-split moves existing sessions only
+
+**Problem**: A terminal tab represents a live PTY session. Dragging it to a pane edge must not create a new PTY or duplicate the terminal, otherwise the UI would show two tabs for different processes while the user expected a layout move.
+
+**Solution**: Keep pane layout as a pure tree transform. The store action should accept the existing `sessionId`, `targetPaneId`, and edge, then move that session id into a new leaf created around the target pane.
+
+```typescript
+type TerminalPaneDropEdge = "left" | "right" | "top" | "bottom";
+
+splitSessionToPaneEdge(sessionId: string, targetPaneId: string, edge: TerminalPaneDropEdge): void;
+```
+
+**Contracts**:
+
+- Same pane + one tab: no-op; do not create an empty split.
+- Same pane + multiple tabs: remove `sessionId` from the original leaf, create a new leaf on the requested edge, and keep the remaining tabs in the original leaf.
+- Cross pane: remove `sessionId` from its source leaf, split the target leaf, and normalize any empty source leaf.
+- Never call `pty_create`; this is a layout/session move, not terminal creation.
+
+**Good/Base/Bad Cases**:
+
+- Good: dragging tab A to the right edge of pane B creates a horizontal split where A is in the new right leaf.
+- Base: dragging tab A to the center of pane B moves A into pane B without changing split structure.
+- Bad: dragging the only tab in pane A to pane A's own edge creates an empty pane; this must stay a no-op.
+
+**Tests Required**:
+
+- Assert no duplicate `sessionId` exists after every move.
+- Assert total session id set is unchanged after edge split.
+- Assert same-pane single-tab edge split returns `changed: false`.
+- Assert `activePaneId` and `activeSessionId` point to the moved tab when a split succeeds.
+
 ---
 
 ## Common Mistakes

@@ -2,19 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { useShallow } from "zustand/shallow";
 import {
   DndContext,
-  closestCenter,
+  DragOverlay,
   PointerSensor,
+  closestCenter,
+  pointerWithin,
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core";
 import { SortableContext, horizontalListSortingStrategy, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useTerminalStore, type SplitTerminalOptions, type TabNotificationState } from "../stores/terminalStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useProjectStore } from "../stores/projectStore";
-import type { TerminalPaneLeaf, TerminalPaneSplitDirection } from "../stores/terminalPaneTree";
+import type { TerminalPaneDropEdge, TerminalPaneLeaf, TerminalPaneSplitDirection } from "../stores/terminalPaneTree";
 import { collectPaneLeaves } from "../stores/terminalPaneTree";
 import { SplitTerminalView } from "./SplitTerminalView";
 import { XTermTerminal } from "./XTermTerminal";
@@ -57,6 +62,9 @@ const TAB_NOTIFICATION_LABELS: Record<TabNotificationState, string> = {
 
 const PULSING_TAB_STATES = new Set<TabNotificationState>(["running", "attention"]);
 const PANE_DROP_PREFIX = "pane-drop:";
+const PANE_CENTER_DROP_PREFIX = "pane-center:";
+const PANE_EDGE_DROP_PREFIX = "pane-edge:";
+const PANE_DROP_EDGES: TerminalPaneDropEdge[] = ["left", "right", "top", "bottom"];
 const SPLIT_PICKER_OUTSIDE_GUARD_MS = 250;
 
 type SplitPickerState = {
@@ -65,6 +73,47 @@ type SplitPickerState = {
   x: number;
   y: number;
 } | null;
+
+type PaneDropTarget =
+  | { type: "center"; paneId: string }
+  | { type: "edge"; paneId: string; edge: TerminalPaneDropEdge };
+
+type PaneDropPreview = { paneId: string; edge: TerminalPaneDropEdge } | null;
+
+function isTerminalPaneDropEdge(value: string): value is TerminalPaneDropEdge {
+  return PANE_DROP_EDGES.includes(value as TerminalPaneDropEdge);
+}
+
+function parsePaneDropTarget(id: string): PaneDropTarget | null {
+  if (id.startsWith(PANE_CENTER_DROP_PREFIX)) return { type: "center", paneId: id.slice(PANE_CENTER_DROP_PREFIX.length) };
+  if (id.startsWith(PANE_DROP_PREFIX)) return { type: "center", paneId: id.slice(PANE_DROP_PREFIX.length) };
+  if (!id.startsWith(PANE_EDGE_DROP_PREFIX)) return null;
+
+  const payload = id.slice(PANE_EDGE_DROP_PREFIX.length);
+  const [paneId, edge] = payload.split(":");
+  if (!paneId || !edge || !isTerminalPaneDropEdge(edge)) return null;
+  return { type: "edge", paneId, edge };
+}
+
+function isPaneDropCollisionId(id: string): boolean {
+  return id.startsWith(PANE_EDGE_DROP_PREFIX) || id.startsWith(PANE_CENTER_DROP_PREFIX) || id.startsWith(PANE_DROP_PREFIX);
+}
+
+const terminalTabCollisionDetection: CollisionDetection = (args) => {
+  const pointerCollisions = pointerWithin(args);
+  const edgeCollision = pointerCollisions.find((collision) => String(collision.id).startsWith(PANE_EDGE_DROP_PREFIX));
+  if (edgeCollision) return [edgeCollision];
+
+  const centerCollision = pointerCollisions.find((collision) => String(collision.id).startsWith(PANE_CENTER_DROP_PREFIX));
+  if (centerCollision) return [centerCollision];
+
+  const closestCollisions = closestCenter(args);
+  const tabCollision = closestCollisions.find((collision) => !isPaneDropCollisionId(String(collision.id)));
+  if (tabCollision) return [tabCollision];
+
+  const paneBarCollision = pointerCollisions.find((collision) => String(collision.id).startsWith(PANE_DROP_PREFIX));
+  return paneBarCollision ? [paneBarCollision] : closestCollisions;
+};
 
 function resolveHistorySourceFilter(cliTool: string | null | undefined): HistorySourceFilter {
   const normalized = cliTool?.trim().toLowerCase();
@@ -167,9 +216,9 @@ function SortableTab({
 
   const horizontalTransform = transform ? { ...transform, y: 0 } : transform;
   const style = {
-    transform: CSS.Transform.toString(horizontalTransform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
+    transform: isDragging ? undefined : CSS.Transform.toString(horizontalTransform),
+    transition: isDragging ? undefined : transition,
+    opacity: isDragging ? 0.45 : 1,
     zIndex: isDragging ? 10 : undefined,
   };
 
@@ -259,6 +308,37 @@ function SortableTab({
       </ContextMenuTrigger>
       <ContextMenuContent>{menuContent(getTabAnchor)}</ContextMenuContent>
     </ContextMenu>
+  );
+}
+
+function DragOverlayTab({
+  title,
+  notification,
+  statusUpdatedAt,
+}: {
+  title: string;
+  notification: TabNotificationState;
+  statusUpdatedAt: string | null;
+}) {
+  const statusLabel = TAB_NOTIFICATION_LABELS[notification];
+  const statusTitle = `状态：${statusLabel}\n会话：${title}\n更新时间：${formatTabStatusUpdatedAt(statusUpdatedAt)}`;
+  const tabMinWidthClass = notification === "none" ? "min-w-[92px]" : "min-w-[118px]";
+
+  return (
+    <div
+      className={`ui-tab-trigger ui-terminal-drag-overlay-tab mx-1 flex h-7 ${tabMinWidthClass} max-w-[180px] items-center gap-2 rounded-lg px-3 text-[12px] font-medium`}
+      data-selected="true"
+      title={statusTitle}
+    >
+      <span
+        className="ui-tab-runtime-dot w-2 h-2 rounded-full shrink-0"
+        data-pulsing={PULSING_TAB_STATES.has(notification) ? "true" : "false"}
+        style={{ backgroundColor: TAB_NOTIFICATION_COLORS[notification], color: TAB_NOTIFICATION_COLORS[notification] }}
+        aria-hidden="true"
+      />
+      <span className="min-w-0 flex-1 truncate tracking-[0.01em]">{title}</span>
+      {notification !== "none" && <span className="shrink-0 text-[10px] leading-none text-on-surface-variant">{statusLabel}</span>}
+    </div>
   );
 }
 
@@ -650,6 +730,7 @@ interface PaneLeafViewProps {
   terminalBackgroundEnabled: boolean;
   terminalBackgroundImagePath: string | null;
   hiddenBackgroundSessionIds: Set<string>;
+  activeDropPreview?: PaneDropPreview;
   onActivateSession: (sessionId: string) => void;
   onCloseSession: (sessionId: string) => void;
   onStartEdit: (sessionId: string) => void;
@@ -682,6 +763,7 @@ function PaneLeafView({
   terminalBackgroundEnabled,
   terminalBackgroundImagePath,
   hiddenBackgroundSessionIds,
+  activeDropPreview,
   onActivateSession,
   onCloseSession,
   onStartEdit,
@@ -750,8 +832,29 @@ function PaneLeafView({
             />
           </div>
         ))}
+        <PaneContentDropZones paneId={pane.id} activeDropPreview={activeDropPreview} />
       </div>
     </div>
+  );
+}
+
+function PaneContentDropZones({ paneId, activeDropPreview }: { paneId: string; activeDropPreview?: PaneDropPreview }) {
+  const centerDrop = useDroppable({ id: `${PANE_CENTER_DROP_PREFIX}${paneId}` });
+  const leftDrop = useDroppable({ id: `${PANE_EDGE_DROP_PREFIX}${paneId}:left` });
+  const rightDrop = useDroppable({ id: `${PANE_EDGE_DROP_PREFIX}${paneId}:right` });
+  const topDrop = useDroppable({ id: `${PANE_EDGE_DROP_PREFIX}${paneId}:top` });
+  const bottomDrop = useDroppable({ id: `${PANE_EDGE_DROP_PREFIX}${paneId}:bottom` });
+  const activeEdge = activeDropPreview?.paneId === paneId ? activeDropPreview.edge : null;
+
+  return (
+    <>
+      <div ref={centerDrop.setNodeRef} className="ui-terminal-pane-center-drop" aria-hidden="true" />
+      <div ref={leftDrop.setNodeRef} className="ui-terminal-pane-edge-drop ui-terminal-pane-edge-drop-left" aria-hidden="true" />
+      <div ref={rightDrop.setNodeRef} className="ui-terminal-pane-edge-drop ui-terminal-pane-edge-drop-right" aria-hidden="true" />
+      <div ref={topDrop.setNodeRef} className="ui-terminal-pane-edge-drop ui-terminal-pane-edge-drop-top" aria-hidden="true" />
+      <div ref={bottomDrop.setNodeRef} className="ui-terminal-pane-edge-drop ui-terminal-pane-edge-drop-bottom" aria-hidden="true" />
+      {activeEdge && <div className="ui-terminal-pane-drop-preview" data-edge={activeEdge} aria-hidden="true" />}
+    </>
   );
 }
 
@@ -831,6 +934,7 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
   const createSession = useTerminalStore((s) => s.createSession);
   const reorderSessions = useTerminalStore((s) => s.reorderSessions);
   const moveSessionToPane = useTerminalStore((s) => s.moveSessionToPane);
+  const splitSessionToPaneEdge = useTerminalStore((s) => s.splitSessionToPaneEdge);
   const renameSession = useTerminalStore((s) => s.renameSession);
   const splitTerminal = useTerminalStore((s) => s.splitTerminal);
   const unsplitTerminal = useTerminalStore((s) => s.unsplitTerminal);
@@ -855,12 +959,18 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<"terminal" | "history">("terminal");
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [splitPicker, setSplitPicker] = useState<SplitPickerState>(null);
+  const [activeDragSessionId, setActiveDragSessionId] = useState<string | null>(null);
+  const [activeDropPreview, setActiveDropPreview] = useState<PaneDropPreview>(null);
   const splitPickerOpenFrameRef = useRef<number | null>(null);
   const splitPickerOpenTimerRef = useRef<number | null>(null);
   const splitPickerOutsideGuardUntilRef = useRef(0);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const allPanes = useMemo(() => collectPaneLeaves(paneTree), [paneTree]);
+  const activeDragSession = useMemo(
+    () => activeDragSessionId ? sessions.find((session) => session.id === activeDragSessionId) ?? null : null,
+    [activeDragSessionId, sessions]
+  );
   const effectiveTerminalThemeName = terminalThemeMode === "follow-app" ? "auto" : terminalThemeName;
   const terminalTheme = useMemo(
     () => getTerminalTheme(effectiveTerminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette),
@@ -966,28 +1076,80 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
     setActiveWorkspaceTab("terminal");
   }, [handleCloseSplitPicker, splitPicker, splitTerminal]);
 
-  const handleDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const activeId = String(active.id);
-    const overId = String(over.id);
-    const sourcePane = allPanes.find((pane) => pane.sessionIds.includes(activeId));
-    if (!sourcePane) return;
+  const findPaneForSession = useCallback((sessionId: string) => {
+    return allPanes.find((pane) => pane.sessionIds.includes(sessionId)) ?? null;
+  }, [allPanes]);
 
-    if (overId.startsWith(PANE_DROP_PREFIX)) {
-      const targetPaneId = overId.slice(PANE_DROP_PREFIX.length);
-      if (targetPaneId !== sourcePane.id) moveSessionToPane(activeId, targetPaneId);
+  const canSplitSessionToPaneEdge = useCallback((sessionId: string, targetPaneId: string) => {
+    const sourcePane = findPaneForSession(sessionId);
+    const targetPane = allPanes.find((pane) => pane.id === targetPaneId) ?? null;
+    if (!sourcePane || !targetPane) return false;
+    return sourcePane.id !== targetPane.id || sourcePane.sessionIds.length > 1;
+  }, [allPanes, findPaneForSession]);
+
+  const clearDragState = useCallback(() => {
+    setActiveDragSessionId(null);
+    setActiveDropPreview(null);
+  }, []);
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    const sessionId = String(event.active.id);
+    if (!sessions.some((session) => session.id === sessionId)) return;
+    setActiveDragSessionId(sessionId);
+    setActiveWorkspaceTab("terminal");
+  }, [sessions]);
+
+  const handleDragOver = useCallback((event: DragOverEvent) => {
+    if (!activeDragSessionId || !event.over) {
+      setActiveDropPreview(null);
       return;
     }
 
-    const targetPane = allPanes.find((pane) => pane.sessionIds.includes(overId));
+    const dropTarget = parsePaneDropTarget(String(event.over.id));
+    if (dropTarget?.type === "edge" && canSplitSessionToPaneEdge(activeDragSessionId, dropTarget.paneId)) {
+      setActiveDropPreview({ paneId: dropTarget.paneId, edge: dropTarget.edge });
+      return;
+    }
+
+    setActiveDropPreview(null);
+  }, [activeDragSessionId, canSplitSessionToPaneEdge]);
+
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    clearDragState();
+    if (!over || active.id === over.id) return;
+
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    const sourcePane = findPaneForSession(activeId);
+    if (!sourcePane) return;
+
+    const dropTarget = parsePaneDropTarget(overId);
+    if (dropTarget?.type === "edge") {
+      if (canSplitSessionToPaneEdge(activeId, dropTarget.paneId)) {
+        splitSessionToPaneEdge(activeId, dropTarget.paneId, dropTarget.edge);
+        setActiveWorkspaceTab("terminal");
+      }
+      return;
+    }
+
+    if (dropTarget?.type === "center") {
+      if (dropTarget.paneId !== sourcePane.id) {
+        moveSessionToPane(activeId, dropTarget.paneId);
+        setActiveWorkspaceTab("terminal");
+      }
+      return;
+    }
+
+    const targetPane = findPaneForSession(overId);
     if (!targetPane) return;
     if (targetPane.id === sourcePane.id) {
       reorderSessions(activeId, overId);
       return;
     }
     moveSessionToPane(activeId, targetPane.id, overId);
-  }, [allPanes, moveSessionToPane, reorderSessions]);
+    setActiveWorkspaceTab("terminal");
+  }, [canSplitSessionToPaneEdge, clearDragState, findPaneForSession, moveSessionToPane, reorderSessions, splitSessionToPaneEdge]);
 
   const renderToolbarActions = useCallback(() => (
     <div className="ui-terminal-actions flex h-full shrink-0 items-center gap-2 px-2.5">
@@ -1068,6 +1230,7 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
       terminalBackgroundEnabled={terminalBackgroundEnabled}
       terminalBackgroundImagePath={terminalBackgroundImagePath}
       hiddenBackgroundSessionIds={hiddenBackgroundSessionIds}
+      activeDropPreview={activeDropPreview}
       onActivateSession={handleActivateSession}
       onCloseSession={closeSession}
       onStartEdit={setEditingSessionId}
@@ -1086,6 +1249,7 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
     />
   ), [
     activeSessionId,
+    activeDropPreview,
     allPanes,
     closeSession,
     darkThemePalette,
@@ -1146,8 +1310,24 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
           style={{ display: historyActive ? "none" : "block" }}
         >
           {paneTree && sessions.length > 0 ? (
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <DndContext
+              sensors={sensors}
+              collisionDetection={terminalTabCollisionDetection}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDragCancel={clearDragState}
+              onDragEnd={handleDragEnd}
+            >
               <SplitTerminalView node={paneTree} renderLeaf={renderLeaf} />
+              <DragOverlay dropAnimation={null}>
+                {activeDragSession ? (
+                  <DragOverlayTab
+                    title={activeDragSession.title}
+                    notification={tabNotifications[activeDragSession.id] ?? "none"}
+                    statusUpdatedAt={tabStatusDetails[activeDragSession.id]?.updatedAt ?? null}
+                  />
+                ) : null}
+              </DragOverlay>
             </DndContext>
           ) : null}
           {sessions.length === 0 && !useExternalTerminal && (

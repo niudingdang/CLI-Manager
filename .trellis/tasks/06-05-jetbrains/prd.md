@@ -31,8 +31,8 @@
 * 在“终端设置”的“终端行为”区域增加 `Unsplit` 行为设置，让用户选择取消分屏时是“合并到相邻 pane”还是“关闭当前 pane 内终端”。
 * 支持嵌套分屏：例如左侧一个终端，右侧上下两个终端。
 * 支持拖动分隔线调整 pane 比例。
-* 支持拖拽 terminal tab 到其它 pane 的 tab bar，实现跨 pane 移动，并保留同 pane 内 tab 排序能力。
-* MVP 暂不支持拖 tab 到 pane 边缘自动创建新分屏，也不支持拖动整个 pane 改布局位置；这些可后续扩展。
+* 支持拖拽 terminal tab 到其它 pane 的 tab bar 或 pane 中心区域，实现跨 pane 移动，并保留同 pane 内 tab 排序能力。
+* 支持拖拽 terminal tab 到 pane 的 left / right / top / bottom 边缘，直接把目标 pane 分屏并把现有 session 移入新 pane；仅移动已有 session，不新建 PTY、不复制 terminal。
 * 兼容现有“终端标签切换”快捷键：优先在当前 active pane 内循环切换；若当前 pane 只有一个 tab，再跳到下一个 pane 的 active tab。不新增 pane 焦点切换快捷键。
 * 第一版不做布局恢复：关闭/重启应用后不要求恢复 pane tree。
 * 不引入新的状态管理库或复杂布局库，优先沿用 React + Zustand + 现有 DnD/菜单体系。
@@ -47,7 +47,9 @@
 * [ ] 终端设置页提供取消分屏行为设置：合并到相邻 pane / 关闭当前 pane 内终端。
 * [ ] 当设置为关闭当前 pane 内终端时，Unsplit 只关闭该 pane 的终端，不影响其它 pane。
 * [ ] Move to Other Split 能把一个 terminal tab 移到其它 pane，tab 状态展示保持一致。
-* [ ] 拖拽 terminal tab 到其它 pane 的 tab bar 能完成跨 pane 移动；拖到同 pane tab bar 仍能排序。
+* [ ] 拖拽 terminal tab 到其它 pane 的 tab bar 或 pane 中心区域能完成跨 pane 移动；拖到同 pane tab bar 仍能排序。
+* [ ] 拖拽 terminal tab 到任一 pane 的 left / right / top / bottom 边缘时显示灰色半透明落点预览，松手后分屏目标 pane 并移动现有 session。
+* [ ] 同 pane 边缘分屏仅在原 pane 还有其它 tab 时生效；拖唯一 tab 到自己边缘不会制造空布局。
 * [ ] 拖拽移动后，空 pane 会按 Unsplit 默认策略归并或规范化，不能留下不可交互空区域。
 * [ ] tab 上的运行状态颜色、脉冲、tooltip 语义保持现有表现。
 * [ ] 命令面板中的分屏动作仍可用，语义更新为 Split Right / Split Down / Unsplit。
@@ -108,8 +110,8 @@
 
 5. **Drag and resize**
    * Support divider resize with min-size constraints and stable keys.
-   * Support same-pane tab reorder and cross-pane tab drag into another pane tab bar.
-   * Exclude edge-drop-to-create-split and pane drag/reposition from MVP.
+   * Support same-pane tab reorder, cross-pane tab drag into another pane tab bar/center, and edge-drop split by moving the existing session.
+   * Exclude pane drag/reposition from MVP.
 
 6. **Verification**
    * Run typecheck and targeted tests.

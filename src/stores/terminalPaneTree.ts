@@ -1,4 +1,5 @@
 export type TerminalPaneSplitDirection = "horizontal" | "vertical";
+export type TerminalPaneDropEdge = "left" | "right" | "top" | "bottom";
 
 export interface TerminalPaneLeaf {
   type: "leaf";
@@ -120,6 +121,75 @@ export function splitPaneLeaf(
   };
 
   return { tree: update(tree), activePaneId: newPane.id };
+}
+
+function directionFromDropEdge(edge: TerminalPaneDropEdge): TerminalPaneSplitDirection {
+  return edge === "left" || edge === "right" ? "horizontal" : "vertical";
+}
+
+function shouldPlaceDroppedPaneFirst(edge: TerminalPaneDropEdge): boolean {
+  return edge === "left" || edge === "top";
+}
+
+export function splitExistingSessionToPaneEdge(
+  tree: TerminalPaneNode | null,
+  sessionId: string,
+  targetPaneId: string,
+  edge: TerminalPaneDropEdge,
+  createId: IdFactory
+): { tree: TerminalPaneNode | null; activePaneId: string | null; activeSessionId: string | null; changed: boolean } {
+  const sourcePane = findPaneLeafBySession(tree, sessionId);
+  const targetPane = findPaneLeaf(tree, targetPaneId);
+  if (!tree || !sourcePane || !targetPane) {
+    return { tree, activePaneId: null, activeSessionId: null, changed: false };
+  }
+
+  const isSamePane = sourcePane.id === targetPane.id;
+  if (isSamePane && sourcePane.sessionIds.length <= 1) {
+    return { tree, activePaneId: sourcePane.id, activeSessionId: sourcePane.activeSessionId, changed: false };
+  }
+
+  const direction = directionFromDropEdge(edge);
+  const droppedPane = createPaneLeaf(createId(), [sessionId], sessionId);
+  const placeDroppedPaneFirst = shouldPlaceDroppedPaneFirst(edge);
+
+  const removeSessionFromLeaf = (leaf: TerminalPaneLeaf): TerminalPaneLeaf => {
+    const sessionIds = leaf.sessionIds.filter((id) => id !== sessionId);
+    const activeSessionId = leaf.activeSessionId === sessionId ? sessionIds[sessionIds.length - 1] ?? null : leaf.activeSessionId;
+    return createPaneLeaf(leaf.id, sessionIds, activeSessionId);
+  };
+
+  const splitTargetLeaf = (leaf: TerminalPaneLeaf): TerminalPaneSplit => {
+    const target = isSamePane ? removeSessionFromLeaf(leaf) : leaf;
+    return {
+      type: "split",
+      id: createId(),
+      direction,
+      ratio: 0.5,
+      first: placeDroppedPaneFirst ? droppedPane : target,
+      second: placeDroppedPaneFirst ? target : droppedPane,
+    };
+  };
+
+  const update = (node: TerminalPaneNode): TerminalPaneNode | null => {
+    if (node.type === "leaf") {
+      if (node.id === targetPaneId) return splitTargetLeaf(node);
+      if (node.id === sourcePane.id) return removeSessionFromLeaf(node);
+      return node;
+    }
+    return normalizePaneTree({
+      ...node,
+      first: update(node.first) ?? createPaneLeaf("empty-first"),
+      second: update(node.second) ?? createPaneLeaf("empty-second"),
+    });
+  };
+
+  return {
+    tree: normalizePaneTree(update(tree)),
+    activePaneId: droppedPane.id,
+    activeSessionId: sessionId,
+    changed: true,
+  };
 }
 
 export function setPaneActiveSession(tree: TerminalPaneNode | null, sessionId: string): { tree: TerminalPaneNode | null; activePaneId: string | null } {

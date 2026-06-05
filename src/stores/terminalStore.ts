@@ -21,7 +21,9 @@ import {
   resizePaneSplit,
   setPaneActiveSession,
   splitPaneLeaf,
+  splitExistingSessionToPaneEdge,
   unsplitPaneLeaf,
+  type TerminalPaneDropEdge,
   type TerminalPaneNode,
   type TerminalPaneSplitDirection,
 } from "./terminalPaneTree";
@@ -113,6 +115,7 @@ interface TerminalStore {
   handleShellRuntimeEvent: (payload: ShellRuntimePayload) => string | null;
   reorderSessions: (fromId: string, toId: string) => void;
   moveSessionToPane: (sessionId: string, targetPaneId: string, beforeSessionId?: string) => void;
+  splitSessionToPaneEdge: (sessionId: string, targetPaneId: string, edge: TerminalPaneDropEdge) => void;
   renameSession: (id: string, title: string) => void;
   splitTerminal: (sessionId: string, direction: TerminalPaneSplitDirection, options?: SplitTerminalOptions) => Promise<string | null>;
   unsplitTerminal: (sessionId: string) => Promise<void>;
@@ -477,6 +480,18 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     const result = moveSessionToPaneTree(get().paneTree, sourcePane.id, targetPane.id, sessionId, beforeSessionId);
     set({ paneTree: result.tree, activePaneId: result.activePaneId, activeSessionId: sessionId });
     scheduleSaveActiveId(sessionId);
+  },
+
+  splitSessionToPaneEdge: (sessionId, targetPaneId, edge) => {
+    const result = splitExistingSessionToPaneEdge(get().paneTree, sessionId, targetPaneId, edge, createPaneId);
+    if (!result.changed) return;
+    set({
+      paneTree: result.tree,
+      activePaneId: result.activePaneId,
+      activeSessionId: result.activeSessionId,
+      splits: {},
+    });
+    scheduleSaveActiveId(result.activeSessionId);
   },
 
   renameSession: (id, title) => {
