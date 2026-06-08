@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type { HistoryStatsHeatmapDay } from "../../lib/types";
 
 type TrendMetric = "sessions" | "messages";
@@ -18,13 +18,15 @@ interface ChartPoint {
   messagesY: number;
 }
 
+const DAY_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+  weekday: "short",
+});
+
 function formatDayLabel(dayStartUtc: number): string {
   if (!Number.isFinite(dayStartUtc) || dayStartUtc <= 0) return "-";
-  return new Date(dayStartUtc).toLocaleDateString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    weekday: "short",
-  });
+  return DAY_FORMATTER.format(new Date(dayStartUtc));
 }
 
 function linePath(points: ChartPoint[], key: PointKey): string {
@@ -42,7 +44,9 @@ function areaPath(points: ChartPoint[], baselineY: number, key: PointKey): strin
   return `${start} ${middle} ${end}`;
 }
 
-export function StatsTrendChart({ days, selectedDayStart, onSelectDay }: StatsTrendChartProps) {
+export const StatsTrendChart = memo(StatsTrendChartImpl);
+
+function StatsTrendChartImpl({ days, selectedDayStart, onSelectDay }: StatsTrendChartProps) {
   const [hoverDayStart, setHoverDayStart] = useState<number | null>(null);
   const [visible, setVisible] = useState({ sessions: true, messages: true });
   const chartHeight = 228;

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { useTemplateStore } from "../../../stores/templateStore";
 import { useProjectStore } from "../../../stores/projectStore";
 import { useTerminalStore } from "../../../stores/terminalStore";
@@ -44,6 +46,7 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<"create" | "edit">("create");
   const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [form, setForm] = useState<TemplateEditorForm>({
     name: "",
     command: "",
@@ -95,6 +98,7 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
   const resetToCreate = () => {
     setMode("create");
     setSelectedId(null);
+    setConfirmingDelete(false);
     setForm({
       name: "",
       command: "",
@@ -107,6 +111,7 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
   const openEditor = (template: CommandTemplate) => {
     setMode("edit");
     setSelectedId(template.id);
+    setConfirmingDelete(false);
     setForm({
       name: template.name,
       command: template.command,
@@ -185,8 +190,8 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
     || (mode === "create" && form.scope === "session" && !activeSessionId);
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[320px_1fr]">
-      <section className="ui-surface-card rounded-2xl border border-border p-3">
+    <div className="grid grid-cols-[280px_minmax(0,1fr)] gap-4">
+      <section className="ui-surface-card min-w-0 rounded-2xl border border-border p-3">
         <div className="mb-2 flex items-center justify-between">
           <div className="text-sm font-semibold text-on-surface">模板列表</div>
           <button
@@ -226,8 +231,8 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
         </div>
       </section>
 
-      <section className="ui-surface-card rounded-2xl border border-border p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
+      <section className="ui-surface-card min-w-0 rounded-2xl border border-border p-4">
+        <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-container px-4 py-3">
           <div>
             <div className="text-sm font-semibold text-on-surface">
               {mode === "create" ? "新建模板" : "编辑模板"}
@@ -236,61 +241,95 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
               新建与编辑共用同一表单，避免行为分叉。
             </div>
           </div>
-          {mode === "edit" && (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {mode === "edit" && (
+              <button
+                onClick={resetToCreate}
+                className="ui-interactive rounded-md border border-border px-3 py-1.5 text-xs text-on-surface-variant"
+              >
+                取消编辑
+              </button>
+            )}
             <button
-              onClick={() => void handleDelete()}
-              className="ui-interactive rounded-md border border-danger/50 px-2 py-1 text-[11px] text-danger"
+              onClick={() => void handleSave()}
+              disabled={saveDisabled}
+              className="rounded-md bg-primary px-4 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              删除
+              {saving ? "保存中..." : "确认保存"}
             </button>
-          )}
+            {mode === "edit" && (
+              confirmingDelete ? (
+                <>
+                  <button
+                    onClick={() => setConfirmingDelete(false)}
+                    className="ui-interactive rounded-md border border-border px-3 py-1.5 text-xs text-on-surface-variant"
+                  >
+                    取消删除
+                  </button>
+                  <button
+                    onClick={() => void handleDelete()}
+                    className="rounded-md border border-danger/50 bg-danger px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                  >
+                    确认删除
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setConfirmingDelete(true)}
+                  className="ui-interactive rounded-md border border-danger/50 px-3 py-1.5 text-xs text-danger"
+                >
+                  删除
+                </button>
+              )
+            )}
+          </div>
         </div>
 
         <div className="space-y-3">
           <div>
             <label className="mb-1 block text-xs text-on-surface-variant">名称</label>
-            <input
+            <Input
               value={form.name}
               onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
               placeholder="例如：启动后端服务"
-              className="ui-focus-ring w-full rounded-lg border border-border bg-surface-container-high px-2 py-1.5 text-xs text-on-surface outline-none"
+              className="text-xs"
             />
           </div>
 
           <div>
             <label className="mb-1 block text-xs text-on-surface-variant">命令</label>
-            <input
+            <Input
               value={form.command}
               onChange={(e) => setForm((prev) => ({ ...prev, command: e.target.value }))}
               placeholder="支持 ${projectPath}, ${projectName}"
-              className="ui-focus-ring w-full rounded-lg border border-border bg-surface-container-high px-2 py-1.5 text-xs text-on-surface outline-none"
+              className="text-xs"
             />
           </div>
 
           <div>
             <label className="mb-1 block text-xs text-on-surface-variant">描述</label>
-            <input
+            <Input
               value={form.description}
               onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
               placeholder="可选"
-              className="ui-focus-ring w-full rounded-lg border border-border bg-surface-container-high px-2 py-1.5 text-xs text-on-surface outline-none"
+              className="text-xs"
             />
           </div>
 
           <div>
             <label className="mb-1 block text-xs text-on-surface-variant">作用域</label>
-            <select
+            <Select
               value={form.scope}
               onChange={(e) => setForm((prev) => ({ ...prev, scope: e.target.value as Scope }))}
               disabled={mode === "edit"}
-              className="ui-focus-ring w-full rounded-lg border border-border bg-surface-container-high px-2 py-1.5 text-xs text-on-surface outline-none disabled:opacity-70"
+              className="text-xs disabled:opacity-70"
             >
               <option value="global">全局</option>
               <option value="project">项目</option>
               <option value="session" disabled={!activeSessionId}>
                 会话
               </option>
-            </select>
+            </Select>
             {!activeSessionId && form.scope === "session" && (
               <div className="mt-1 text-[11px] text-warning">当前无活跃会话，不能创建会话模板。</div>
             )}
@@ -304,11 +343,11 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
           {form.scope === "project" && (
             <div>
               <label className="mb-1 block text-xs text-on-surface-variant">目标项目</label>
-              <select
+              <Select
                 value={form.projectId ?? ""}
                 onChange={(e) => setForm((prev) => ({ ...prev, projectId: e.target.value || null }))}
                 disabled={mode === "edit"}
-                className="ui-focus-ring w-full rounded-lg border border-border bg-surface-container-high px-2 py-1.5 text-xs text-on-surface outline-none disabled:opacity-70"
+                className="text-xs disabled:opacity-70"
               >
                 <option value="">请选择项目</option>
                 {projects.map((project) => (
@@ -316,7 +355,7 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
                     {project.name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           )}
 
@@ -328,23 +367,6 @@ export function TemplateSettingsPage({ searchValue }: TemplateSettingsPageProps)
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-2 pt-1">
-            {mode === "edit" && (
-              <button
-                onClick={resetToCreate}
-                className="ui-interactive rounded-md border border-border px-3 py-1.5 text-xs text-on-surface-variant"
-              >
-                取消编辑
-              </button>
-            )}
-            <button
-              onClick={() => void handleSave()}
-              disabled={saveDisabled}
-              className="ui-interactive rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-            >
-              {saving ? "保存中..." : "保存"}
-            </button>
-          </div>
         </div>
       </section>
     </div>

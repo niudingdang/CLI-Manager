@@ -1,127 +1,22 @@
-import { useMemo, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { Diff, Hunk, parseDiff, type FileData } from "react-diff-view";
+import "react-diff-view/style/index.css";
 import { FileCode2, GitCompareArrows, X } from "lucide-react";
 import type { HistoryMessage } from "../../lib/types";
+import DiffWorker from "../../lib/diffParser.worker.ts?worker";
+import type { ParsedDiffBlock } from "../../lib/diffParser.worker";
+import { cn } from "@/lib/utils";
 
 interface DiffModalProps {
   open: boolean;
   messages: HistoryMessage[];
+  container?: HTMLElement | null;
   onClose: () => void;
   onJumpToMessage: (messageIndex: number) => void;
 }
 
-interface DiffBlock {
-  id: string;
-  filePath: string;
-  patch: string;
-  messageIndex: number;
-  timestamp: string | null;
-}
-
-interface LineTheme {
-  color: string;
-  backgroundColor: string;
-}
-
-const THEME_DEFAULT: LineTheme = {
-  color: "var(--text-primary)",
-  backgroundColor: "transparent",
-};
-const THEME_ADD: LineTheme = {
-  color: "var(--success)",
-  backgroundColor: "rgba(16, 185, 129, 0.1)",
-};
-const THEME_DELETE: LineTheme = {
-  color: "var(--danger)",
-  backgroundColor: "rgba(244, 63, 94, 0.1)",
-};
-const THEME_HUNK: LineTheme = {
-  color: "#93c5fd",
-  backgroundColor: "rgba(59, 130, 246, 0.12)",
-};
-const THEME_HEADER: LineTheme = {
-  color: "var(--warning)",
-  backgroundColor: "rgba(245, 158, 11, 0.1)",
-};
-
-function extractFilePath(diffText: string): string {
-  const applyPatchHeader = diffText.match(/^\*\*\* (?:Update|Add|Delete) File:\s+([^\r\n]+)/m);
-  if (applyPatchHeader) {
-    return applyPatchHeader[1].trim();
-  }
-  const gitHeader = diffText.match(/^diff --git a\/(.+?) b\/(.+)$/m);
-  if (gitHeader) {
-    return gitHeader[2];
-  }
-  const plusHeader = diffText.match(/^\+\+\+\s+(?:b\/)?([^\r\n]+)/m);
-  if (plusHeader) {
-    return plusHeader[1];
-  }
-  return "unknown-file";
-}
-
-function splitApplyPatchBlocks(content: string): string[] {
-  const segments: string[] = [];
-  const byEnvelope = content.match(/\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch/g);
-  if (!byEnvelope) {
-    return segments;
-  }
-
-  for (const patch of byEnvelope) {
-    const fileParts = patch
-      .split(/(?=^\*\*\* (?:Update|Add|Delete) File:\s+)/m)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0 && /^\*\*\* (?:Update|Add|Delete) File:\s+/m.test(item));
-    if (fileParts.length > 0) {
-      segments.push(...fileParts);
-    } else {
-      segments.push(patch.trim());
-    }
-  }
-  return segments;
-}
-
-function splitDiffBlocks(content: string): string[] {
-  const chunks: string[] = [];
-  const fenced = /```(?:diff|patch)?\s*([\s\S]*?)```/gi;
-  let match: RegExpExecArray | null;
-  while ((match = fenced.exec(content)) !== null) {
-    const body = match[1]?.trim();
-    if (body) {
-      chunks.push(body);
-    }
-  }
-  if (content.includes("*** Begin Patch")) {
-    chunks.push(...splitApplyPatchBlocks(content));
-  }
-
-  if (content.includes("diff --git")) {
-    chunks.push(content);
-  } else if (chunks.length === 0 && content.includes("@@") && content.includes("+++")) {
-    chunks.push(content);
-  }
-
-  const blocks: string[] = [];
-  for (const chunk of chunks) {
-    if (chunk.includes("diff --git")) {
-      const parts = chunk
-        .split(/(?=^diff --git )/m)
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0);
-      blocks.push(...parts);
-      continue;
-    }
-    blocks.push(chunk.trim());
-  }
-
-  return blocks.filter((item) => {
-    const isUnified =
-      item.includes("@@") && (item.includes("+++ ") || item.includes("diff --git"));
-    const isApplyPatch = /^\*\*\* (?:Update|Add|Delete) File:\s+/m.test(item);
-    return isUnified || isApplyPatch;
-  });
-}
-
-function classifyLineTheme(line: string): LineTheme {
+function classifyFallbackLine(line: string): string {
   if (
     line.startsWith("*** Begin Patch") ||
     line.startsWith("*** End Patch") ||
@@ -133,158 +28,231 @@ function classifyLineTheme(line: string): LineTheme {
     line.startsWith("--- ") ||
     line.startsWith("+++ ")
   ) {
-    return THEME_HEADER;
+    return "history-diff-fallback-header";
   }
-  if (line.startsWith("@@")) {
-    return THEME_HUNK;
-  }
-  if (line.startsWith("+") && !line.startsWith("+++")) {
-    return THEME_ADD;
-  }
-  if (line.startsWith("-") && !line.startsWith("---")) {
-    return THEME_DELETE;
-  }
-  return THEME_DEFAULT;
+  if (line.startsWith("@@")) return "history-diff-fallback-hunk";
+  if (line.startsWith("+") && !line.startsWith("+++")) return "history-diff-fallback-add";
+  if (line.startsWith("-") && !line.startsWith("---")) return "history-diff-fallback-delete";
+  return "history-diff-fallback-line";
 }
 
 function renderHighlightedPatch(patch: string): ReactNode {
-  const lines = patch.split("\n");
-  return lines.map((line, index) => {
-    const theme = classifyLineTheme(line);
-    return (
-      <span
-        key={`${line}-${index}`}
-        style={{
-          display: "block",
-          width: "max-content",
-          minWidth: "100%",
-          color: theme.color,
-          backgroundColor: theme.backgroundColor,
-          paddingLeft: "0.25rem",
-          paddingRight: "0.25rem",
-        }}
-      >
-        {line || " "}
-      </span>
-    );
-  });
+  return patch.split("\n").map((line, index) => (
+    <span key={index} className={classifyFallbackLine(line)}>
+      {line || " "}
+    </span>
+  ));
 }
 
-function DiffCodeViewer({ patch }: { patch: string }) {
+const FallbackDiffViewer = memo(function FallbackDiffViewer({ patch }: { patch: string }) {
   return (
-    <div className="mt-2">
-      <div
-        className="rounded-md border overflow-x-scroll overflow-y-hidden max-w-full diff-code-scroll"
-        style={{
-          borderColor: "var(--border)",
-          backgroundColor: "var(--bg-secondary)",
-          scrollbarGutter: "stable both-edges",
-        }}
-      >
-        <pre
-          className="text-xs whitespace-pre m-0 p-2 min-w-max font-mono leading-5 diff-code-inner"
-          style={{ color: "var(--text-primary)" }}
-        >
-          {renderHighlightedPatch(patch)}
-        </pre>
+    <div className="mt-2 rounded-md border border-border bg-bg-secondary overflow-x-scroll overflow-y-hidden max-w-full diff-code-scroll">
+      <pre className="text-xs whitespace-pre m-0 p-2 min-w-max font-mono leading-5 diff-code-inner text-text-primary">
+        {renderHighlightedPatch(patch)}
+      </pre>
+    </div>
+  );
+});
+
+function isDiffCandidate(content: string): boolean {
+  return (
+    content.includes("diff --git") ||
+    content.includes("*** Begin Patch") ||
+    content.includes("@@") ||
+    content.includes("+++")
+  );
+}
+
+function parseBlockFiles(patch: string): FileData[] {
+  if (!patch.includes("diff --git") && !patch.includes("--- ")) return [];
+  try {
+    return parseDiff(patch, { nearbySequences: "zip" });
+  } catch {
+    return [];
+  }
+}
+
+function countChanges(files: FileData[]): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const file of files) {
+    for (const hunk of file.hunks) {
+      for (const change of hunk.changes) {
+        if (change.type === "insert") additions += 1;
+        if (change.type === "delete") deletions += 1;
+      }
+    }
+  }
+  return { additions, deletions };
+}
+
+function DiffBlockViewer({ block }: { block: ParsedDiffBlock }) {
+  const files = useMemo(() => parseBlockFiles(block.patch), [block.patch]);
+  const changes = useMemo(() => countChanges(files), [files]);
+
+  if (files.length === 0) {
+    return <FallbackDiffViewer patch={block.patch} />;
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
+        <span className="rounded bg-success/10 px-1.5 py-0.5 text-success">+{changes.additions}</span>
+        <span className="rounded bg-danger/10 px-1.5 py-0.5 text-danger">-{changes.deletions}</span>
       </div>
+      {files.map((file, index) => (
+        <div key={`${file.oldPath ?? "old"}-${file.newPath ?? "new"}-${index}`} className="history-diff-viewer rounded-md border border-border overflow-x-auto diff-code-scroll">
+          <Diff
+            viewType="split"
+            diffType={file.type}
+            hunks={file.hunks}
+            gutterType="default"
+            optimizeSelection
+          >
+            {(hunks) => hunks.map((hunk) => <Hunk key={hunk.content} hunk={hunk} />)}
+          </Diff>
+        </div>
+      ))}
     </div>
   );
 }
 
-function parseDiffs(messages: HistoryMessage[]): DiffBlock[] {
-  const result: DiffBlock[] = [];
-  messages.forEach((msg, index) => {
-    const content = msg.content?.trim();
-    if (!content) return;
-    const blocks = splitDiffBlocks(content);
-    blocks.forEach((patch, seq) => {
-      result.push({
-        id: `${index}-${seq}`,
-        filePath: extractFilePath(patch),
-        patch,
-        messageIndex: index,
-        timestamp: msg.timestamp ?? null,
-      });
+export function DiffModal({ open, messages, container, onClose, onJumpToMessage }: DiffModalProps) {
+  const workerRef = useRef<Worker | null>(null);
+  const requestIdRef = useRef(0);
+  const [blocks, setBlocks] = useState<ParsedDiffBlock[]>([]);
+  const [parsing, setParsing] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+
+    if (!workerRef.current) {
+      workerRef.current = new DiffWorker();
+    }
+    const worker = workerRef.current;
+    const requestId = ++requestIdRef.current;
+    setParsing(true);
+
+    const onMessage = (event: MessageEvent<{ id: number; blocks: ParsedDiffBlock[] }>) => {
+      if (event.data.id !== requestId) return;
+      setBlocks(event.data.blocks);
+      setParsing(false);
+    };
+    worker.addEventListener("message", onMessage);
+    worker.postMessage({
+      id: requestId,
+      messages: messages.flatMap((m, index) =>
+        isDiffCandidate(m.content) ? [{ content: m.content, timestamp: m.timestamp ?? null, messageIndex: index }] : []
+      ),
     });
-  });
-  return result;
-}
 
-export function DiffModal({ open, messages, onClose, onJumpToMessage }: DiffModalProps) {
-  const blocks = useMemo(() => parseDiffs(messages), [messages]);
-
-  if (!open) return null;
+    return () => {
+      worker.removeEventListener("message", onMessage);
+    };
+  }, [open, messages]);
 
   return (
-    <div
-      className="absolute inset-0 flex items-center justify-center p-4"
-      style={{ zIndex: 56, backgroundColor: "rgba(0, 0, 0, 0.45)" }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+    <DialogPrimitive.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
       }}
     >
-      <div
-        className="w-full max-w-5xl h-[min(84vh,780px)] rounded-lg border overflow-hidden flex flex-col"
-        style={{ borderColor: "var(--border)", backgroundColor: "var(--bg-primary)" }}
-      >
-        <div
-          className="px-3 py-2 border-b flex items-center justify-between"
-          style={{ borderColor: "var(--border)" }}
-        >
-          <div className="inline-flex items-center gap-1.5 text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-            <GitCompareArrows size={15} />
-            Diff 视图
-          </div>
-          <button
-            onClick={onClose}
-            className="inline-flex items-center justify-center rounded-md border w-7 h-7"
-            style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
-            title="关闭"
-          >
-            <X size={14} />
-          </button>
-        </div>
-
-        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-          {blocks.length === 0 && (
-            <div className="px-3 py-6 text-xs text-center" style={{ color: "var(--text-muted)" }}>
-              当前会话暂未解析到 unified diff
-            </div>
+      <DialogPrimitive.Portal container={container ?? undefined}>
+        <DialogPrimitive.Overlay
+          className={cn(
+            "absolute inset-0 bg-black/45",
+            "data-[state=open]:animate-fade-in data-[state=closed]:animate-fade-out"
           )}
-
-          {blocks.map((block) => (
+          style={{ zIndex: 56 }}
+        />
+        <DialogPrimitive.Content
+          className={cn(
+            "absolute inset-0 flex items-center justify-center p-4 outline-none",
+            "data-[state=open]:animate-scale-in data-[state=closed]:animate-scale-out"
+          )}
+          style={{ zIndex: 56 }}
+        >
+          <div
+            className="w-full max-w-6xl h-[min(84vh,780px)] rounded-lg border overflow-hidden flex flex-col"
+            style={{ borderColor: "var(--border)", backgroundColor: "var(--bg-primary)" }}
+          >
             <div
-              key={block.id}
-              className="px-3 py-3 border-b min-w-0"
+              className="px-3 py-2 border-b flex items-center justify-between"
               style={{ borderColor: "var(--border)" }}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="inline-flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
-                    <FileCode2 size={12} />
-                    <span className="truncate">{block.filePath}</span>
-                  </div>
-                  <div className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>
-                    来自消息 #{block.messageIndex + 1} · {block.timestamp ?? "-"}
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    onJumpToMessage(block.messageIndex);
-                    onClose();
-                  }}
-                  className="text-xs px-2 py-1 rounded-md shrink-0"
-                  style={{ backgroundColor: "var(--accent)", color: "#fff" }}
-                >
-                  跳回消息
-                </button>
-              </div>
-              <DiffCodeViewer patch={block.patch} />
+              <DialogPrimitive.Title
+                className="inline-flex items-center gap-1.5 text-sm font-semibold"
+                style={{ color: "var(--text-primary)" }}
+              >
+                <GitCompareArrows size={15} />
+                Diff 视图
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Close
+                className="inline-flex items-center justify-center rounded-md border w-7 h-7"
+                style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+                title="关闭"
+                aria-label="关闭"
+              >
+                <X size={14} />
+              </DialogPrimitive.Close>
             </div>
-          ))}
-        </div>
-      </div>
-    </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+              {parsing && (
+                <div className="px-3 py-6 text-xs text-center" style={{ color: "var(--text-muted)" }}>
+                  正在解析 diff...
+                </div>
+              )}
+
+              {!parsing && blocks.length === 0 && (
+                <div className="px-3 py-6 text-xs text-center" style={{ color: "var(--text-muted)" }}>
+                  当前会话暂未解析到 unified diff
+                </div>
+              )}
+
+              {!parsing &&
+                blocks.map((block) => (
+                  <div
+                    key={block.id}
+                    className="px-3 py-3 border-b min-w-0"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="inline-flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
+                          <FileCode2 size={12} />
+                          <span className="truncate">{block.filePath}</span>
+                        </div>
+                        <div className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>
+                          来自消息 #{block.messageIndex + 1} · {block.timestamp ?? "-"}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          onJumpToMessage(block.messageIndex);
+                          onClose();
+                        }}
+                        className="text-xs px-2 py-1 rounded-md shrink-0"
+                        style={{ backgroundColor: "var(--accent)", color: "#fff" }}
+                      >
+                        跳回消息
+                      </button>
+                    </div>
+                    <DiffBlockViewer block={block} />
+                  </div>
+                ))}
+            </div>
+          </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }

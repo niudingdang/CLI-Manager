@@ -1,13 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod claude_hook;
 mod commands;
 mod pty;
-mod webdav;
+mod shell_resolver;
 mod sync;
+mod webdav;
 
 use log::LevelFilter;
-use tauri_plugin_sql::{Builder as SqlBuilder, Migration, MigrationKind};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager,
+};
 use tauri_plugin_log::{Builder as LogBuilder, Target, TargetKind, TimezoneStrategy};
+use tauri_plugin_sql::{Builder as SqlBuilder, Migration, MigrationKind};
 
 fn migrations() -> Vec<Migration> {
     vec![
@@ -128,6 +135,24 @@ fn migrations() -> Vec<Migration> {
             ",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            description: "add_secondary_indexes",
+            sql: "
+                CREATE INDEX IF NOT EXISTS idx_session_meta_project ON session_meta(project_key);
+                CREATE INDEX IF NOT EXISTS idx_projects_group ON projects(group_id);
+            ",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 9,
+            description: "add_path_and_session_indexes",
+            sql: "
+                CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
+                CREATE INDEX IF NOT EXISTS idx_session_meta_file ON session_meta(file_path);
+            ",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -148,28 +173,83 @@ pub fn run() {
     };
 
     tauri::Builder::default()
-        .plugin(
+        .plugin({
+            let mut targets = vec![Target::new(TargetKind::LogDir {
+                file_name: Some("cli-manager.log".into()),
+            })];
+            if debug_logs {
+                targets.push(Target::new(TargetKind::Webview));
+                targets.push(Target::new(TargetKind::Stdout));
+            }
             LogBuilder::new()
                 .level(log_level)
                 .timezone_strategy(TimezoneStrategy::UseLocal)
-                .targets([
-                    Target::new(TargetKind::LogDir {
-                        file_name: Some("cli-manager.log".into()),
-                    }),
-                    Target::new(TargetKind::Webview),
-                    Target::new(TargetKind::Stdout),
-                ])
-                .build(),
-        )
-        .setup(move |_| {
+                .targets(targets)
+                .build()
+        })
+        .setup(move |app| {
             log::set_max_level(log_level);
+            app.manage(claude_hook::ClaudeHookBridge::start(app.handle().clone()));
             log::info!(
                 "CLI-Manager started (log_level={})",
-                if log_level == LevelFilter::Debug { "debug" } else { "info" }
+                if log_level == LevelFilter::Debug {
+                    "debug"
+                } else {
+                    "info"
+                }
             );
+
+            let show_item = MenuItem::with_id(app, "tray_show", "显示", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "tray_quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            TrayIconBuilder::with_id("main-tray")
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .ok_or("missing default window icon")?,
+                )
+                .tooltip("CLI-Manager")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "tray_show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "tray_quit" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.emit("tray-quit-requested", ());
+                        } else {
+                            app.exit(0);
+                        }
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(pty::manager::PtyManager::new())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -190,13 +270,27 @@ pub fn run() {
             commands::shell::open_windows_terminal,
             commands::history::history_list_sessions,
             commands::history::history_get_session,
+            commands::history::history_delete_session,
             commands::history::history_search,
             commands::history::history_list_prompts,
             commands::history::history_get_stats,
+            commands::sync::sync_get_default_device_name,
+            commands::sync::sync_list_device_snapshots,
             commands::sync::sync_test_connection,
             commands::sync::sync_upload,
             commands::sync::sync_download,
+            commands::sync::sync_local_export,
+            commands::sync::sync_local_import,
             commands::version::get_app_version,
+            commands::background::save_background_image,
+            commands::background::cleanup_unused_backgrounds,
+            commands::background::background_image_exists,
+            commands::hook_settings::hook_settings_get_status,
+            commands::hook_settings::hook_settings_install,
+            commands::hook_settings::hook_settings_uninstall,
+            commands::hook_settings::hook_settings_install_codex,
+            commands::hook_settings::hook_settings_uninstall_codex,
+            commands::hook_settings::hook_settings_select_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

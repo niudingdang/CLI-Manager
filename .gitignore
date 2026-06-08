@@ -27,8 +27,16 @@ dist-ssr
 .ace-tool/
 .claude/
 .worktrees/
+.agents/
+.codex/
+.xcodemap/
 
 # Tauri
 src-tauri/target/
 
 prototype/
+.cursor
+.serena
+.gitnexus
+CLAUDE.md
+AGENTS.md

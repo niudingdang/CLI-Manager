@@ -1,10 +1,12 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import { getDb } from "../lib/db";
+import { getDb, batchUpdateSortOrder } from "../lib/db";
 import type {
   Project, CreateProjectInput, UpdateProjectInput,
   Group, CreateGroupInput, TreeNode,
 } from "../lib/types";
+
+let inflightFetchAll: Promise<void> | null = null;
 
 interface ProjectStore {
   projects: Project[];
@@ -23,6 +25,8 @@ interface ProjectStore {
   renameGroup: (id: string, name: string) => Promise<void>;
   deleteGroup: (id: string) => Promise<void>;
   reorderItems: (parentId: string | null, orderedIds: string[]) => Promise<void>;
+  moveProjectToGroup: (projectId: string, targetGroupId: string | null) => Promise<void>;
+  moveGroupToParent: (groupId: string, targetParentId: string | null) => Promise<void>;
 }
 
 function buildTree(groups: Group[], projects: Project[], search: string): TreeNode[] {
@@ -106,26 +110,33 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   fetchAll: async () => {
-    const db = await getDb();
-    const [groups, projects] = await Promise.all([
-      db.select<Group[]>("SELECT * FROM groups ORDER BY sort_order, name"),
-      db.select<Project[]>("SELECT * FROM projects ORDER BY sort_order, name"),
-    ]);
-    const tree = buildTree(groups, projects, get().searchQuery);
-
-    // Path health check
-    let projectHealth = get().projectHealth;
-    if (projects.length > 0) {
+    if (inflightFetchAll) return inflightFetchAll;
+    inflightFetchAll = (async () => {
       try {
-        const paths = projects.map((p) => p.path);
-        const results = await invoke<boolean[]>("check_paths_exist", { paths });
-        const health: Record<string, boolean> = {};
-        projects.forEach((p, i) => { health[p.id] = results[i]; });
-        projectHealth = health;
-      } catch { /* ignore */ }
-    }
+        const db = await getDb();
+        const [groups, projects] = await Promise.all([
+          db.select<Group[]>("SELECT * FROM groups ORDER BY sort_order, name"),
+          db.select<Project[]>("SELECT * FROM projects ORDER BY sort_order, name"),
+        ]);
+        // Path health check
+        let projectHealth = get().projectHealth;
+        if (projects.length > 0) {
+          try {
+            const paths = projects.map((p) => p.path);
+            const results = await invoke<boolean[]>("check_paths_exist", { paths });
+            const health: Record<string, boolean> = {};
+            projects.forEach((p, i) => { health[p.id] = results[i]; });
+            projectHealth = health;
+          } catch { /* ignore */ }
+        }
 
-    set({ groups, projects, tree, projectHealth });
+        const tree = buildTree(groups, projects, get().searchQuery);
+        set({ groups, projects, tree, projectHealth });
+      } finally {
+        inflightFetchAll = null;
+      }
+    })();
+    return inflightFetchAll;
   },
 
   fetchProjects: async () => {
@@ -241,17 +252,82 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   reorderItems: async (_parentId, orderedIds) => {
+    if (orderedIds.length === 0) return;
     const db = await getDb();
     const groupIds = new Set(get().groups.map((g) => g.id));
 
+    const groupUpdates: Array<[string, number]> = [];
+    const projectUpdates: Array<[string, number]> = [];
     for (let i = 0; i < orderedIds.length; i++) {
       const id = orderedIds[i];
       if (groupIds.has(id)) {
-        await db.execute("UPDATE groups SET sort_order = $1 WHERE id = $2", [i, id]);
+        groupUpdates.push([id, i]);
       } else {
-        await db.execute("UPDATE projects SET sort_order = $1 WHERE id = $2", [i, id]);
+        projectUpdates.push([id, i]);
       }
     }
+
+    // 合并成单条 CASE WHEN UPDATE：从 N 次 execute（N 次 fsync）变成 1 次。
+    await batchUpdateSortOrder(db, "groups", groupUpdates);
+    await batchUpdateSortOrder(db, "projects", projectUpdates);
+    await get().fetchAll();
+  },
+
+  moveProjectToGroup: async (projectId, targetGroupId) => {
+    const db = await getDb();
+    const { projects } = get();
+    const project = projects.find((p) => p.id === projectId);
+    if (!project) return;
+    if (project.group_id === targetGroupId) return;
+
+    const siblings = projects.filter((p) => p.group_id === targetGroupId && p.id !== projectId);
+    const maxOrder = siblings.reduce((m, p) => Math.max(m, p.sort_order ?? 0), -1);
+    const nextOrder = maxOrder + 1;
+    const ts = Date.now().toString();
+
+    await db.execute(
+      "UPDATE projects SET group_id = $1, sort_order = $2, updated_at = $3 WHERE id = $4",
+      [targetGroupId, nextOrder, ts, projectId]
+    );
+    await get().fetchAll();
+  },
+
+  moveGroupToParent: async (groupId, targetParentId) => {
+    if (groupId === targetParentId) return;
+    const db = await getDb();
+    const { groups } = get();
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) return;
+    if (group.parent_id === targetParentId) return;
+
+    // Reject moving a group into itself or any of its descendants
+    if (targetParentId) {
+      const descendantIds = new Set<string>();
+      const stack = [groupId];
+      const childMap = new Map<string | null, Group[]>();
+      for (const g of groups) {
+        const arr = childMap.get(g.parent_id) ?? [];
+        arr.push(g);
+        childMap.set(g.parent_id, arr);
+      }
+      while (stack.length > 0) {
+        const id = stack.pop()!;
+        descendantIds.add(id);
+        for (const child of childMap.get(id) ?? []) {
+          stack.push(child.id);
+        }
+      }
+      if (descendantIds.has(targetParentId)) return;
+    }
+
+    const siblings = groups.filter((g) => g.parent_id === targetParentId && g.id !== groupId);
+    const maxOrder = siblings.reduce((m, g) => Math.max(m, g.sort_order ?? 0), -1);
+    const nextOrder = maxOrder + 1;
+
+    await db.execute(
+      "UPDATE groups SET parent_id = $1, sort_order = $2 WHERE id = $3",
+      [targetParentId, nextOrder, groupId]
+    );
     await get().fetchAll();
   },
 }));

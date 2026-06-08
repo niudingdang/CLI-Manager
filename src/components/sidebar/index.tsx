@@ -1,12 +1,13 @@
 ﻿import { useState, useEffect, useRef, useCallback, useMemo, type MouseEvent as ReactMouseEvent } from "react";
+import { useShallow } from "zustand/shallow";
 import type { DragEndEvent } from "@dnd-kit/core";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTerminalStore, type SessionStatus } from "../../stores/terminalStore";
+import { useTerminalStore, type SessionStatus, type SplitTerminalOptions } from "../../stores/terminalStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import type { TerminalPaneSplitDirection } from "../../stores/terminalPaneTree";
 import type { Project, TreeNode as TNode, Group } from "../../lib/types";
 import { ConfigModal } from "../ConfigModal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { SettingsModal } from "../SettingsModal";
 import { openWindowsTerminal } from "../../lib/externalTerminal";
 import { TreeContext, type TreeActions } from "./TreeContext";
 import { Portal } from "../ui/Portal";
@@ -16,9 +17,12 @@ import { SidebarHeader } from "./SidebarHeader";
 import { SidebarSearch } from "./SidebarSearch";
 import { ProjectTree } from "./ProjectTree";
 import { SidebarFooter } from "./SidebarFooter";
+import type { SettingsTab } from "../SettingsModal";
 
 interface SidebarProps {
-  onOpenStats?: () => void;
+  onOpenSettings: (tab?: SettingsTab) => void;
+  onOpenStats: () => void;
+  compactMode?: boolean;
 }
 
 const SIDEBAR_COLLAPSED_WIDTH = 60;
@@ -36,28 +40,63 @@ function normalizePersistedSidebarWidth(width: number): number {
   return clampExpandedSidebarWidth(width);
 }
 
-export function Sidebar({ onOpenStats }: SidebarProps) {
+function buildProjectSplitOptions(project: Project): SplitTerminalOptions {
+  const title = project.cli_tool ? `${project.name} (${project.cli_tool})` : project.name;
+  let envVars: Record<string, string> | undefined;
+  try {
+    const parsed = JSON.parse(project.env_vars || "{}");
+    if (typeof parsed === "object" && parsed !== null && Object.keys(parsed).length > 0) {
+      envVars = parsed as Record<string, string>;
+    }
+  } catch {
+    // ignore invalid env json
+  }
+
+  return {
+    projectId: project.id,
+    cwd: project.path,
+    title,
+    startupCmd: project.startup_cmd || project.cli_tool || undefined,
+    envVars,
+    shell: project.shell && project.shell !== "powershell" ? project.shell : undefined,
+  };
+}
+
+export function Sidebar({ onOpenSettings, onOpenStats, compactMode = false }: SidebarProps) {
   const {
     tree,
     projects,
     groups,
     searchQuery,
-    setSearchQuery,
-    fetchAll,
-    deleteProject,
-    createGroup,
-    renameGroup,
-    deleteGroup,
     projectHealth,
-    reorderItems,
-  } = useProjectStore();
+  } = useProjectStore(
+    useShallow((s) => ({
+      tree: s.tree,
+      projects: s.projects,
+      groups: s.groups,
+      searchQuery: s.searchQuery,
+      projectHealth: s.projectHealth,
+    }))
+  );
+  const setSearchQuery = useProjectStore((s) => s.setSearchQuery);
+  const fetchAll = useProjectStore((s) => s.fetchAll);
+  const deleteProject = useProjectStore((s) => s.deleteProject);
+  const createGroup = useProjectStore((s) => s.createGroup);
+  const renameGroup = useProjectStore((s) => s.renameGroup);
+  const deleteGroup = useProjectStore((s) => s.deleteGroup);
+  const reorderItems = useProjectStore((s) => s.reorderItems);
+  const moveGroupToParent = useProjectStore((s) => s.moveGroupToParent);
+  const moveProjectToGroup = useProjectStore((s) => s.moveProjectToGroup);
   const createSession = useTerminalStore((s) => s.createSession);
+  const splitTerminal = useTerminalStore((s) => s.splitTerminal);
   const sessions = useTerminalStore((s) => s.sessions);
+  const activeSessionId = useTerminalStore((s) => s.activeSessionId);
+  const setActiveSession = useTerminalStore((s) => s.setActive);
   const sessionStatuses = useTerminalStore((s) => s.sessionStatuses);
   const useExternalTerminal = useSettingsStore((s) => s.useExternalTerminal);
   const sidebarDensity = useSettingsStore((s) => s.sidebarDensity);
-  const persistedSidebarWidth = useSettingsStore((s) => s.sidebarWidth);
   const updateSetting = useSettingsStore((s) => s.update);
+  const persistedSidebarWidth = useSettingsStore((s) => s.sidebarWidth);
 
   const initialSidebarWidth = normalizePersistedSidebarWidth(persistedSidebarWidth);
   const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
@@ -88,19 +127,50 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
     | { kind: "delete-project"; project: Project }
     | { kind: "delete-group"; groupId: string; groupName: string }
   >(null);
+
+  const activeSessionProjectId = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId)?.projectId ?? null,
+    [activeSessionId, sessions]
+  );
+
+  useEffect(() => {
+    if (!activeSessionProjectId) return;
+    setSelectedId(activeSessionProjectId);
+    setSelectedProjectIds((prev) => {
+      if (prev.size === 1 && prev.has(activeSessionProjectId)) return prev;
+      return new Set([activeSessionProjectId]);
+    });
+  }, [activeSessionProjectId]);
+
+  const activateFirstProjectSession = useCallback(
+    (projectId: string): boolean => {
+      const session = sessions.find((item) => item.projectId === projectId);
+      if (!session) return false;
+      if (session.id !== activeSessionId) {
+        setActiveSession(session.id);
+      }
+      return true;
+    },
+    [activeSessionId, sessions, setActiveSession]
+  );
+
   const [contextMenu, setContextMenu] = useState<
     | null
     | { kind: "project"; project: Project; x: number; y: number }
     | { kind: "group"; groupId: string; groupName: string; x: number; y: number }
   >(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuOpenedAtRef = useRef(0);
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
   const [newGroupParentId, setNewGroupParentId] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (compactMode) {
+      setSidebarCollapsed(false);
+      return;
+    }
     if (isResizingRef.current) return;
     const normalized = normalizePersistedSidebarWidth(persistedSidebarWidth);
     setSidebarWidth(normalized);
@@ -109,7 +179,7 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
     if (normalized > SIDEBAR_COLLAPSED_WIDTH) {
       lastExpandedWidthRef.current = normalized;
     }
-  }, [persistedSidebarWidth]);
+  }, [compactMode, persistedSidebarWidth]);
 
   useEffect(() => {
     return () => {
@@ -178,6 +248,7 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
   }, [sidebarCollapsed, expandSidebar]);
 
   useEffect(() => {
+    if (compactMode) return;
     const syncViewportCollapse = () => {
       if (window.innerWidth < SIDEBAR_AUTO_COLLAPSE_BREAKPOINT) {
         if (!sidebarCollapsed) {
@@ -200,7 +271,7 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
     return () => {
       window.removeEventListener("resize", syncViewportCollapse);
     };
-  }, [sidebarCollapsed, collapseSidebar, expandSidebar]);
+  }, [compactMode, sidebarCollapsed, collapseSidebar, expandSidebar]);
 
   const startResize = useCallback(
     (e: ReactMouseEvent) => {
@@ -245,37 +316,65 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
   );
 
   const handleDragEnd = useCallback(
-    (parentId: string | null, event: DragEndEvent) => {
+    (event: DragEndEvent) => {
       const { active, over } = event;
       if (!over || active.id === over.id) return;
+      const activeId = active.id as string;
+      const overId = over.id as string;
+      const isGroup = (id: string) => groups.some((g) => g.id === id);
+      const isProject = (id: string) => projects.some((p) => p.id === id);
 
-      const findChildren = (pid: string | null): TNode[] => {
-        if (pid === null) return tree;
-        const findInTree = (nodes: TNode[]): TNode[] | null => {
-          for (const node of nodes) {
-            if (node.type === "group" && node.group.id === pid) return node.children;
-            if (node.type === "group") {
-              const found = findInTree(node.children);
-              if (found) return found;
-            }
+      // 1) 拖入指定分组
+      if (overId.startsWith("into:")) {
+        const targetGroupId = overId.slice("into:".length);
+        if (activeId === targetGroupId) return;
+        if (isGroup(activeId)) void moveGroupToParent(activeId, targetGroupId);
+        else if (isProject(activeId)) void moveProjectToGroup(activeId, targetGroupId);
+        return;
+      }
+
+      // 3) 拖到 sibling 节点：先定位 over 所在父级与同级列表
+      const findParentChildren = (
+        nodes: TNode[],
+        targetId: string,
+        parentId: string | null
+      ): { parentId: string | null; nodes: TNode[] } | null => {
+        const here = nodes.some((n) =>
+          n.type === "group" ? n.group.id === targetId : n.project.id === targetId
+        );
+        if (here) return { parentId, nodes };
+        for (const n of nodes) {
+          if (n.type === "group") {
+            const r = findParentChildren(n.children, targetId, n.group.id);
+            if (r) return r;
           }
-          return null;
-        };
-        return findInTree(tree) ?? [];
+        }
+        return null;
       };
 
-      const children = findChildren(parentId);
-      const ids = children.map((c) => (c.type === "group" ? c.group.id : c.project.id));
-      const oldIndex = ids.indexOf(active.id as string);
-      const newIndex = ids.indexOf(over.id as string);
-      if (oldIndex === -1 || newIndex === -1) return;
+      const overContext = findParentChildren(tree, overId, null);
+      if (!overContext) return;
 
+      const ids = overContext.nodes.map((c) => (c.type === "group" ? c.group.id : c.project.id));
+      const oldIndex = ids.indexOf(activeId);
+      const newIndex = ids.indexOf(overId);
+      if (newIndex === -1) return;
+
+      // active 不在同层 → 跨层移到 over 所在父级
+      if (oldIndex === -1) {
+        const targetParent = overContext.parentId;
+        if (isGroup(activeId)) void moveGroupToParent(activeId, targetParent);
+        else if (isProject(activeId)) void moveProjectToGroup(activeId, targetParent);
+        return;
+      }
+
+      // 同层 reorder
       const reordered = [...ids];
       reordered.splice(oldIndex, 1);
-      reordered.splice(newIndex, 0, active.id as string);
-      void reorderItems(parentId, reordered);
+      reordered.splice(newIndex, 0, activeId);
+      void reorderItems(overContext.parentId, reordered);
     },
-    [reorderItems, tree]
+    [groups, projects, tree, reorderItems, moveGroupToParent, moveProjectToGroup]
   );
 
   const loadProjects = useCallback(async () => {
@@ -299,6 +398,7 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
   useEffect(() => {
     if (!contextMenu) return;
     const handler = (e: Event) => {
+      if (Date.now() - contextMenuOpenedAtRef.current < 120) return;
       if (contextMenuRef.current && contextMenuRef.current.contains(e.target as Node)) return;
       setContextMenu(null);
     };
@@ -317,19 +417,35 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
     };
   }, [contextMenu]);
 
+  // 把 sessions × statuses 预聚合成 Map<projectId, status>，从每节点 O(N) filter
+  // 变成 O(1) lookup。原方案在 TreeNodeItem 中每行调用一次，叠加项目树 + 状态变化
+  // 会触发 O(N·M) 全表扫描。
+  const projectStatusMap = useMemo(() => {
+    const map = new Map<string, SessionStatus>();
+    for (const session of sessions) {
+      const projectId = session.projectId;
+      if (!projectId) continue;
+      const status = (sessionStatuses[session.id] ?? "running") as SessionStatus;
+      const current = map.get(projectId);
+      // running 优先级最高，其次 error，最后 exited
+      if (status === "running") {
+        map.set(projectId, "running");
+        continue;
+      }
+      if (current === "running") continue;
+      if (status === "error") {
+        map.set(projectId, "error");
+        continue;
+      }
+      if (current === "error") continue;
+      map.set(projectId, "exited");
+    }
+    return map;
+  }, [sessions, sessionStatuses]);
+
   const getProjectStatus = useCallback(
-    (projectId: string): SessionStatus | null => {
-      const projectSessions = sessions.filter((s) => s.projectId === projectId);
-      if (projectSessions.length === 0) return null;
-      for (const s of projectSessions) {
-        if ((sessionStatuses[s.id] ?? "running") === "running") return "running";
-      }
-      for (const s of projectSessions) {
-        if (sessionStatuses[s.id] === "error") return "error";
-      }
-      return "exited";
-    },
-    [sessionStatuses, sessions]
+    (projectId: string): SessionStatus | null => projectStatusMap.get(projectId) ?? null,
+    [projectStatusMap]
   );
 
   const isPathInvalid = useCallback(
@@ -346,34 +462,27 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
     });
   }, []);
 
-  const openProjectInternal = async (project: Project) => {
-    const title = project.cli_tool ? `${project.name} (${project.cli_tool})` : project.name;
-    let envVars: Record<string, string> | undefined;
-    try {
-      const parsed = JSON.parse(project.env_vars);
-      if (typeof parsed === "object" && parsed !== null && Object.keys(parsed).length > 0) {
-        envVars = parsed;
-      }
-    } catch {
-      // ignore invalid env json
-    }
+  const openProjectExternally = useCallback(async (items: Project[]) => {
+    if (items.length === 0) return;
+    await openWindowsTerminal(
+      items.map((project) => ({
+        cwd: project.path,
+        title: project.cli_tool ? `${project.name} (${project.cli_tool})` : project.name,
+        startupCmd: project.startup_cmd || project.cli_tool || undefined,
+        shell: project.shell || undefined,
+      }))
+    );
+  }, []);
 
-    const cmd = project.startup_cmd || project.cli_tool || undefined;
-    const shell = project.shell && project.shell !== "powershell" ? project.shell : undefined;
-    await createSession(project.id, project.path, title, cmd, envVars, shell);
+  const openProjectInternal = async (project: Project) => {
+    const options = buildProjectSplitOptions(project);
+    await createSession(options.projectId, options.cwd, options.title, options.startupCmd, options.envVars, options.shell);
   };
 
   const openProjects = async (items: Project[]) => {
     if (items.length === 0) return;
-    if (useExternalTerminal) {
-      await openWindowsTerminal(
-        items.map((project) => ({
-          cwd: project.path,
-          title: project.cli_tool ? `${project.name} (${project.cli_tool})` : project.name,
-          startupCmd: project.startup_cmd || project.cli_tool || undefined,
-          shell: project.shell || undefined,
-        }))
-      );
+    if (compactMode || useExternalTerminal) {
+      await openProjectExternally(items);
       return;
     }
 
@@ -386,7 +495,15 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
     async (project: Project) => {
       await openProjects([project]);
     },
-    [useExternalTerminal, createSession]
+    [openProjects]
+  );
+
+  const handleSplitProject = useCallback(
+    async (project: Project, direction: TerminalPaneSplitDirection) => {
+      if (!activeSessionId || compactMode || useExternalTerminal) return;
+      await splitTerminal(activeSessionId, direction, buildProjectSplitOptions(project));
+    },
+    [activeSessionId, compactMode, splitTerminal, useExternalTerminal]
   );
 
   const handleCloneProject = useCallback((project: Project) => {
@@ -413,12 +530,14 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
       return;
     }
     setSelectedProjectIds(new Set([project.id]));
-  }, []);
+    activateFirstProjectSession(project.id);
+  }, [activateFirstProjectSession]);
 
   const handleSelectProjectByKeyboard = useCallback((project: Project) => {
     setSelectedId(project.id);
     setSelectedProjectIds(new Set([project.id]));
-  }, []);
+    activateFirstProjectSession(project.id);
+  }, [activateFirstProjectSession]);
 
   const handleToggleSelection = useCallback((project: Project) => {
     setSelectedProjectIds((prev) => {
@@ -460,12 +579,16 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
 
   const handleContextMenuProject = useCallback((e: ReactMouseEvent, project: Project) => {
     e.preventDefault();
+    e.stopPropagation();
+    contextMenuOpenedAtRef.current = Date.now();
     setSelectedId(project.id);
     setContextMenu({ kind: "project", project, x: e.clientX, y: e.clientY });
   }, []);
 
   const handleContextMenuGroup = useCallback((e: ReactMouseEvent, groupId: string, groupName: string) => {
     e.preventDefault();
+    e.stopPropagation();
+    contextMenuOpenedAtRef.current = Date.now();
     setContextMenu({ kind: "group", groupId, groupName, x: e.clientX, y: e.clientY });
   }, []);
 
@@ -486,17 +609,24 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
       walk(groupId);
       await openProjects(projects.filter((p) => p.group_id && groupIds.has(p.group_id)));
     },
-    [groups, projects, useExternalTerminal, createSession]
+    // 依赖只列函数体真正读取的值，避免无关 selector 变化引起整树重建。
+    [groups, projects]  // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  const filteredProjects = searchQuery
-    ? projects.filter(
-        (project) =>
-          project.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          project.cli_tool.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : [];
-  const selectedProjects = projects.filter((p) => selectedProjectIds.has(p.id));
+  const filteredProjects = useMemo(() => {
+    if (!searchQuery) return [];
+    const lower = searchQuery.toLowerCase();
+    return projects.filter(
+      (project) =>
+        project.name.toLowerCase().includes(lower) ||
+        project.cli_tool.toLowerCase().includes(lower)
+    );
+  }, [projects, searchQuery]);
+
+  const selectedProjects = useMemo(
+    () => projects.filter((p) => selectedProjectIds.has(p.id)),
+    [projects, selectedProjectIds]
+  );
 
   const treeActions = useMemo<TreeActions>(
     () => ({
@@ -602,79 +732,94 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
 
   return (
     <aside
-      className={`ui-sidebar-shell relative flex shrink-0 select-none flex-col ${
-        sidebarResizing ? "transition-none" : "transition-[width] duration-150"
-      }`}
+      className={`ui-sidebar-shell relative flex select-none flex-col overflow-hidden ${
+        compactMode ? "min-w-0 flex-1" : "shrink-0"
+      } ${sidebarResizing ? "transition-none" : "transition-[width] duration-150"}`}
       data-sidebar-density={sidebarDensity}
-      style={{ width: sidebarWidth }}
+      style={{ width: compactMode ? "100%" : sidebarWidth }}
     >
-      <SidebarHeader
-        collapsed={sidebarCollapsed}
-        density={sidebarDensity}
-        onToggleCollapse={toggleSidebarCollapsed}
-        onCreateGroup={() => {
-          ensureSidebarExpanded();
-          setNewGroupParentId("__root__");
-        }}
-        onCreateProject={() => {
-          ensureSidebarExpanded();
-          setAddToGroupId(null);
-          setShowAdd(true);
-        }}
-      />
-
-      <SidebarSearch
-        collapsed={sidebarCollapsed}
-        density={sidebarDensity}
-        searchQuery={searchQuery}
-        selectedCount={selectedProjects.length}
-        filteredCount={filteredProjects.length}
-        onSearchChange={setSearchQuery}
-        onStartFiltered={() => {
-          void openProjects(filteredProjects);
-        }}
-        onStartSelected={() => {
-          void openProjects(selectedProjects);
-        }}
-        onClearSelected={() => setSelectedProjectIds(new Set())}
-        onExpandSidebar={expandSidebar}
-      />
-
-      <TreeContext.Provider value={treeActions}>
-        <ProjectTree
-          tree={tree}
-          initialLoading={initialLoading}
-          loadError={loadError}
-          collapsed={sidebarCollapsed}
+      <div className="ui-sidebar-top">
+        <SidebarHeader
+          collapsed={compactMode ? false : sidebarCollapsed}
           density={sidebarDensity}
-          newGroupParentId={newGroupParentId}
-          onCreateRootGroup={(name) => handleCreateGroup(null, name)}
-          onCancelRootGroup={handleCancelNewGroup}
-          onQuickAddProject={() => {
+          onToggleCollapse={toggleSidebarCollapsed}
+          onCreateGroup={() => {
+            ensureSidebarExpanded();
+            setNewGroupParentId("__root__");
+          }}
+          onCreateProject={() => {
             ensureSidebarExpanded();
             setAddToGroupId(null);
             setShowAdd(true);
           }}
-          onRetry={() => {
-            setInitialLoading(true);
-            void loadProjects();
-          }}
         />
-      </TreeContext.Provider>
 
-      <SidebarFooter
-        collapsed={sidebarCollapsed}
-        useExternalTerminal={useExternalTerminal}
-        onToggleExternalTerminal={() => {
-          void updateSetting("useExternalTerminal", !useExternalTerminal);
-        }}
-        onOpenStats={onOpenStats}
-        onOpenSettings={() => setShowSettings(true)}
-      />
+        <SidebarSearch
+          collapsed={compactMode ? false : sidebarCollapsed}
+          density={sidebarDensity}
+          searchQuery={searchQuery}
+          selectedCount={selectedProjects.length}
+          filteredCount={filteredProjects.length}
+          onSearchChange={setSearchQuery}
+          onStartFiltered={() => {
+            void openProjects(filteredProjects);
+          }}
+          onStartSelected={() => {
+            void openProjects(selectedProjects);
+          }}
+          onClearSelected={() => setSelectedProjectIds(new Set())}
+          onExpandSidebar={expandSidebar}
+        />
+      </div>
+
+      <div className={`${compactMode ? "min-h-[220px]" : "min-h-0"} flex-1 overflow-hidden`}>
+        <TreeContext.Provider value={treeActions}>
+          <ProjectTree
+            tree={tree}
+            initialLoading={initialLoading}
+            loadError={loadError}
+            collapsed={compactMode ? false : sidebarCollapsed}
+            density={sidebarDensity}
+            newGroupParentId={newGroupParentId}
+            onCreateRootGroup={(name) => handleCreateGroup(null, name)}
+            onCancelRootGroup={handleCancelNewGroup}
+            onQuickAddProject={() => {
+              ensureSidebarExpanded();
+              setAddToGroupId(null);
+              setShowAdd(true);
+            }}
+            onRetry={() => {
+              setInitialLoading(true);
+              void loadProjects();
+            }}
+          />
+        </TreeContext.Provider>
+      </div>
+
+      <div className="ui-sidebar-footer shrink-0">
+        <SidebarFooter
+          collapsed={compactMode ? false : sidebarCollapsed}
+          onOpenSettings={onOpenSettings}
+          onOpenStats={onOpenStats}
+        />
+      </div>
 
       {contextMenu && (
         <Portal>
-          <div className="context-menu" style={{ left: menuX, top: menuY }} ref={contextMenuRef} role="menu">
+          <div
+            className="context-menu"
+            style={{ left: menuX, top: menuY }}
+            ref={contextMenuRef}
+            role="menu"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+          >
             {contextMenu.kind === "project" && (
               <>
                 <button
@@ -685,7 +830,29 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
                     setContextMenu(null);
                   }}
                 >
-                  打开终端
+                  {compactMode ? "打开外部终端" : "打开终端"}
+                </button>
+                <button
+                  className="context-menu-item"
+                  role="menuitem"
+                  disabled={compactMode || useExternalTerminal || !activeSessionId}
+                  onClick={() => {
+                    void handleSplitProject(contextMenu.project, "horizontal");
+                    setContextMenu(null);
+                  }}
+                >
+                  Split Right
+                </button>
+                <button
+                  className="context-menu-item"
+                  role="menuitem"
+                  disabled={compactMode || useExternalTerminal || !activeSessionId}
+                  onClick={() => {
+                    void handleSplitProject(contextMenu.project, "vertical");
+                    setContextMenu(null);
+                  }}
+                >
+                  Split Down
                 </button>
                 <button
                   className="context-menu-item"
@@ -749,7 +916,7 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
                     setContextMenu(null);
                   }}
                 >
-                  启动本目录
+                  {compactMode ? "打开本目录到外部终端" : "启动本目录"}
                 </button>
                 <button
                   className="context-menu-item"
@@ -824,15 +991,14 @@ export function Sidebar({ onOpenStats }: SidebarProps) {
         onConfirm={confirmDialog?.onConfirm ?? (() => {})}
         onClose={() => setConfirmAction(null)}
       />
-      <Portal>
-        <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
-      </Portal>
 
-      <div
-        onMouseDown={startResize}
-        className="absolute bottom-0 right-0 top-0 z-10 w-1.5 cursor-col-resize transition-colors hover:bg-surface-container-highest"
-        style={{ opacity: 0.8 }}
-      />
+      {!compactMode && (
+        <div
+          onMouseDown={startResize}
+          className="ui-sidebar-resize-handle absolute bottom-0 right-0 top-0 z-10 w-1.5 cursor-col-resize transition-colors"
+          style={{ opacity: 0.8 }}
+        />
+      )}
     </aside>
   );
 }

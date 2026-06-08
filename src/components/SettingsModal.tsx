@@ -6,8 +6,10 @@ import { ThemeSettingsPage } from "./settings/pages/ThemeSettingsPage";
 import { ShortcutSettingsPage } from "./settings/pages/ShortcutSettingsPage";
 import { TemplateSettingsPage } from "./settings/pages/TemplateSettingsPage";
 import { SyncSettingsPage } from "./settings/pages/SyncSettingsPage";
+import { HookSettingsPage } from "./settings/pages/HookSettingsPage";
+import { useSettingsStore } from "../stores/settingsStore";
 
-type SettingsTab = "general" | "terminal-theme" | "shortcuts" | "templates" | "sync";
+export type SettingsTab = "general" | "terminal-theme" | "shortcuts" | "templates" | "sync" | "hooks";
 
 interface SettingsTabConfig {
   label: string;
@@ -16,20 +18,20 @@ interface SettingsTabConfig {
   searchPlaceholder: string;
 }
 
-const SETTINGS_TAB_ORDER: SettingsTab[] = ["general", "terminal-theme", "shortcuts", "templates", "sync"];
+const SETTINGS_TAB_ORDER: SettingsTab[] = ["general", "terminal-theme", "shortcuts", "templates", "sync", "hooks"];
 
 const SETTINGS_TAB_CONFIG: Record<SettingsTab, SettingsTabConfig> = {
   general: {
     label: "通用",
     title: "通用设置",
-    description: "首屏可完成主题、配色、终端、字体与侧栏密度配置。",
+    description: "配置应用主题、配色、界面字体、侧栏与行为偏好。",
     searchPlaceholder: "搜索通用设置（预留）",
   },
   "terminal-theme": {
-    label: "终端主题",
-    title: "终端主题",
-    description: "配置 auto 跟随策略，或固定为指定终端主题。",
-    searchPlaceholder: "搜索终端主题（预留）",
+    label: "终端设置",
+    title: "终端设置",
+    description: "配置终端行为、主题、字体、Shell、背景与实时预览。",
+    searchPlaceholder: "搜索终端设置（预留）",
   },
   shortcuts: {
     label: "快捷键",
@@ -44,28 +46,37 @@ const SETTINGS_TAB_CONFIG: Record<SettingsTab, SettingsTabConfig> = {
     searchPlaceholder: "搜索命令模板（预留）",
   },
   sync: {
-    label: "云同步",
-    title: "云同步",
-    description: "通过 WebDAV 在多设备间同步配置。",
-    searchPlaceholder: "搜索云同步设置（预留）",
+    label: "同步",
+    title: "同步",
+    description: "选择云端（WebDAV）或本地目录方式同步配置。",
+    searchPlaceholder: "搜索同步设置（预留）",
+  },
+  hooks: {
+    label: "Hook 设置",
+    title: "Hook 设置",
+    description: "安装或移除 Claude Code 到 CLI-Manager 标签通知的桥接脚本。",
+    searchPlaceholder: "搜索 Hook 设置（预留）",
   },
 };
 
 interface Props {
   open: boolean;
   onClose: () => void;
+  initialTab?: SettingsTab;
 }
 
-export function SettingsModal({ open, onClose }: Props) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("general");
+export function SettingsModal({ open, onClose, initialTab }: Props) {
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? "general");
   const [searchValue, setSearchValue] = useState("");
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const uiFontFamily = useSettingsStore((s) => s.uiFontFamily);
   useFocusTrap(dialogRef, mounted && !closing);
 
   useEffect(() => {
     if (open) {
+      if (initialTab) setActiveTab(initialTab);
       setMounted(true);
       setClosing(false);
       return;
@@ -104,6 +115,7 @@ export function SettingsModal({ open, onClose }: Props) {
     if (activeTab === "shortcuts") return <ShortcutSettingsPage searchValue={searchValue} />;
     if (activeTab === "templates") return <TemplateSettingsPage searchValue={searchValue} />;
     if (activeTab === "sync") return <SyncSettingsPage />;
+    if (activeTab === "hooks") return <HookSettingsPage />;
     return null;
   })();
 
@@ -112,6 +124,7 @@ export function SettingsModal({ open, onClose }: Props) {
       className={`fixed inset-x-0 bottom-0 top-9 z-50 ${
         closing ? "animate-fade-out" : "animate-fade-in"
       }`}
+      style={{ fontFamily: uiFontFamily }}
       onClick={onClose}
     >
       <div

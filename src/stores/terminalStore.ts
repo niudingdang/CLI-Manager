@@ -2,18 +2,92 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import type { TerminalSession, PersistedSplit, Project } from "../lib/types";
-import { logError } from "../lib/logger";
+import type { TerminalSession, Project } from "../lib/types";
+import { logError, logInfo } from "../lib/logger";
 import { useSettingsStore } from "./settingsStore";
 import { useSessionStore } from "./sessionStore";
 import { normalizeShellKey } from "../lib/shell";
+import {
+  addSessionToPaneTree,
+  collectPaneLeaves,
+  createSinglePaneTree,
+  findFirstSessionId,
+  findPaneLeaf,
+  findPaneLeafBySession,
+  getNextSessionIdForShortcut as resolveNextSessionIdForShortcut,
+  moveSessionToPane as moveSessionToPaneTree,
+  removeSessionFromPaneTree,
+  reorderSessionInPane,
+  resizePaneSplit,
+  setPaneActiveSession,
+  splitPaneLeaf,
+  splitExistingSessionToPaneEdge,
+  unsplitPaneLeaf,
+  type TerminalPaneDropEdge,
+  type TerminalPaneNode,
+  type TerminalPaneSplitDirection,
+} from "./terminalPaneTree";
 
 export type SessionStatus = "running" | "exited" | "error";
+export type CliHookSource = "claude" | "codex";
+export type CliHookEventName = "UserPromptSubmit" | "Notification" | "Stop" | "StopFailure" | "PermissionRequest";
+export type TabNotificationState = "none" | "running" | "attention" | "done" | "failed";
+export type ShellRuntimeEventName = "command_started" | "command_finished" | "prompt_shown";
+
+type TabStatusSourceName = "hook" | "shell";
+
+interface TabStatusSources {
+  hook?: TabNotificationState;
+  shell?: TabNotificationState;
+  hookUpdatedAt?: string;
+  shellUpdatedAt?: string;
+}
+
+export interface TabStatusDetails {
+  status: TabNotificationState;
+  updatedAt: string | null;
+}
+
+export interface ShellRuntimePayload {
+  sessionId: string;
+  event: ShellRuntimeEventName;
+  exitCode?: number | null;
+  timestamp?: string | null;
+}
+
+const SHELL_RUNTIME_MONITORING_ENV = "CLI_MANAGER_SHELL_RUNTIME_MONITORING";
+const TAB_STATUS_PRIORITY: Record<TabNotificationState, number> = {
+  none: 0,
+  done: 1,
+  running: 2,
+  failed: 3,
+  attention: 4,
+};
+
+export interface CliHookPayload {
+  tabId: string;
+  source?: CliHookSource | null;
+  event: CliHookEventName;
+  title?: string | null;
+  message?: string | null;
+  sessionId?: string | null;
+  cwd?: string | null;
+  timestamp?: string | null;
+}
 
 export interface SplitState {
   direction: "horizontal" | "vertical";
   secondSessionId: string;
   ratio: number;
+}
+
+export interface SplitTerminalOptions {
+  projectId?: string;
+  cwd?: string;
+  title?: string;
+  startupCmd?: string;
+  envVars?: Record<string, string>;
+  shell?: string;
 }
 
 interface PtyStatusPayload {
@@ -24,28 +98,182 @@ interface PtyStatusPayload {
 interface TerminalStore {
   sessions: TerminalSession[];
   activeSessionId: string | null;
+  paneTree: TerminalPaneNode | null;
+  activePaneId: string | null;
   sessionStatuses: Record<string, SessionStatus>;
   statusListeners: Record<string, UnlistenFn>;
+  tabNotifications: Record<string, TabNotificationState>;
+  tabStatuses: Record<string, TabStatusSources>;
+  tabStatusDetails: Record<string, TabStatusDetails>;
   splits: Record<string, SplitState>;
+  hiddenBackgroundSessionIds: Set<string>;
   createSession: (projectId?: string, cwd?: string, title?: string, startupCmd?: string, envVars?: Record<string, string>, shell?: string) => Promise<string>;
   closeSession: (id: string) => Promise<void>;
   setActive: (id: string) => void;
+  markAttentionInputHandled: (sessionId: string) => void;
+  handleCliHookEvent: (payload: CliHookPayload) => string | null;
+  handleShellRuntimeEvent: (payload: ShellRuntimePayload) => string | null;
   reorderSessions: (fromId: string, toId: string) => void;
-  splitTerminal: (sessionId: string, direction: "horizontal" | "vertical", cwd?: string, shell?: string) => Promise<void>;
+  moveSessionToPane: (sessionId: string, targetPaneId: string, beforeSessionId?: string) => void;
+  splitSessionToPaneEdge: (sessionId: string, targetPaneId: string, edge: TerminalPaneDropEdge) => void;
+  renameSession: (id: string, title: string) => void;
+  splitTerminal: (sessionId: string, direction: TerminalPaneSplitDirection, options?: SplitTerminalOptions) => Promise<string | null>;
   unsplitTerminal: (sessionId: string) => Promise<void>;
-  setSplitRatio: (sessionId: string, ratio: number) => void;
+  setSplitRatio: (splitId: string, ratio: number) => void;
+  getNextSessionIdForShortcut: (delta: 1 | -1) => string | null;
   restoreSessions: (projectMap: Map<string, Project>, projectHealth: Record<string, boolean>) => Promise<void>;
+  hideBackgroundForSession: (sessionId: string) => void;
+  showBackgroundForSession: (sessionId: string) => void;
 }
 
 // 防止 StrictMode 双重调用
 let restoreInProgress = false;
 
+// setActive 防抖：高频切换标签时合并持久化写入
+let saveActiveIdTimer: ReturnType<typeof setTimeout> | null = null;
+let paneIdSeq = 0;
+
+function createPaneId() {
+  paneIdSeq += 1;
+  return `pane-${Date.now().toString(36)}-${paneIdSeq.toString(36)}`;
+}
+
+function createSplitSessionTitle(options?: SplitTerminalOptions) {
+  return options?.title ?? "Split Terminal";
+}
+
+function scheduleSaveActiveId(id: string | null) {
+  if (saveActiveIdTimer !== null) clearTimeout(saveActiveIdTimer);
+  saveActiveIdTimer = setTimeout(() => {
+    saveActiveIdTimer = null;
+    useSessionStore.getState().saveActiveSessionId(id).catch(() => {});
+  }, 200);
+}
+
+function summarizeStartupCmd(startupCmd?: string): string | null {
+  if (!startupCmd) return null;
+  const redacted = startupCmd
+    .replace(/((?:token|password|passwd|secret|api[_-]?key)\s*=\s*)("[^"]*"|'[^']*'|\S+)/gi, "$1<redacted>")
+    .replace(/(--(?:token|password|passwd|secret|api[_-]?key)\s+)(\S+)/gi, "$1<redacted>");
+  const summary = redacted.replace(/\s+/g, " ").trim();
+  return summary.length > 120 ? `${summary.slice(0, 120)}...` : summary;
+}
+
+function logTerminalExitStatus(session: TerminalSession, payload: PtyStatusPayload) {
+  if (payload.status !== "exited" && payload.status !== "error") return;
+  logInfo("pty status received", {
+    sessionId: session.id,
+    title: session.title,
+    projectId: session.projectId ?? null,
+    cwd: session.cwd ?? null,
+    shell: session.shell ?? null,
+    hasStartupCmd: Boolean(session.startupCmd),
+    startupCmdSummary: summarizeStartupCmd(session.startupCmd),
+    status: payload.status,
+    exit_code: payload.exit_code,
+  });
+}
+
+function mapCliHookEvent(event: CliHookEventName): TabNotificationState | null {
+  if (event === "UserPromptSubmit") return "running";
+  if (event === "PermissionRequest") return "attention";
+  if (event === "StopFailure") return "failed";
+  if (event === "Stop") return "done";
+  return null;
+}
+
+function mapShellRuntimeEvent(event: ShellRuntimeEventName, exitCode?: number | null): TabNotificationState {
+  if (event === "command_started") return "running";
+  if (event === "command_finished") {
+    if (exitCode === 0) return "done";
+    return typeof exitCode === "number" && Number.isFinite(exitCode) ? "failed" : "none";
+  }
+  return "none";
+}
+
+function resolvePrimaryTabId(tabId: string, splits: Record<string, SplitState>): string {
+  for (const [primaryId, split] of Object.entries(splits)) {
+    if (split.secondSessionId === tabId) return primaryId;
+  }
+  return tabId;
+}
+
+function getTabStatusEntry(state: TabStatusSources | undefined): TabNotificationState {
+  if (!state) return "none";
+  const candidates: TabNotificationState[] = [state.hook ?? "none", state.shell ?? "none"];
+  return candidates.reduce((current, next) => (TAB_STATUS_PRIORITY[next] > TAB_STATUS_PRIORITY[current] ? next : current), "none");
+}
+
+function getTabStatusDetails(state: TabStatusSources | undefined): TabStatusDetails {
+  if (!state) return { status: "none", updatedAt: null };
+  const hookScore = state.hook ? TAB_STATUS_PRIORITY[state.hook] : -1;
+  const shellScore = state.shell ? TAB_STATUS_PRIORITY[state.shell] : -1;
+  if (hookScore >= shellScore) {
+    return { status: state.hook ?? "none", updatedAt: state.hookUpdatedAt ?? null };
+  }
+  return { status: state.shell ?? "none", updatedAt: state.shellUpdatedAt ?? null };
+}
+
+function buildTabStatusUpdate(
+  state: Pick<TerminalStore, "tabStatuses" | "tabNotifications" | "tabStatusDetails">,
+  sessionId: string,
+  source: TabStatusSourceName,
+  status: TabNotificationState,
+  updatedAt: string
+): Pick<TerminalStore, "tabStatuses" | "tabNotifications" | "tabStatusDetails"> {
+  const previous = state.tabStatuses[sessionId] ?? {};
+  const next: TabStatusSources = {
+    ...previous,
+    [source]: status,
+    [source === "hook" ? "hookUpdatedAt" : "shellUpdatedAt"]: updatedAt,
+  };
+  return {
+    tabStatuses: {
+      ...state.tabStatuses,
+      [sessionId]: next,
+    },
+    tabNotifications: {
+      ...state.tabNotifications,
+      [sessionId]: getTabStatusEntry(next),
+    },
+    tabStatusDetails: {
+      ...state.tabStatusDetails,
+      [sessionId]: getTabStatusDetails(next),
+    },
+  };
+}
+
+function supportsShellRuntimeMonitoring(shell?: string | null): boolean {
+  const normalized = normalizeShellKey(shell);
+  return normalized === undefined || normalized === "powershell" || normalized === "pwsh";
+}
+
+function isShellRuntimeMonitoringActive(shell?: string | null): boolean {
+  return useSettingsStore.getState().shellRuntimeMonitoringEnabled && supportsShellRuntimeMonitoring(shell);
+}
+
+function buildPtyEnvVars(envVars?: Record<string, string> | null, shell?: string | null): Record<string, string> | null {
+  const next = { ...(envVars ?? {}) };
+  if (isShellRuntimeMonitoringActive(shell)) {
+    next[SHELL_RUNTIME_MONITORING_ENV] = "1";
+  } else {
+    delete next[SHELL_RUNTIME_MONITORING_ENV];
+  }
+  return Object.keys(next).length > 0 ? next : null;
+}
+
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
   sessions: [],
   activeSessionId: null,
+  paneTree: null,
+  activePaneId: null,
   sessionStatuses: {},
   statusListeners: {},
+  tabNotifications: {},
+  tabStatuses: {},
+  tabStatusDetails: {},
   splits: {},
+  hiddenBackgroundSessionIds: new Set<string>(),
 
   createSession: async (projectId, cwd, title, startupCmd, envVars, shell) => {
     const normalizedInputShell = normalizeShellKey(shell);
@@ -57,7 +285,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     try {
       sessionId = await invoke<string>("pty_create", {
         cwd: cwd ?? null,
-        envVars: envVars ?? null,
+        envVars: buildPtyEnvVars(envVars ?? null, resolvedShell),
         shell: resolvedShell,
       });
     } catch (err) {
@@ -83,15 +311,19 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
     const unlisten = await listen<PtyStatusPayload>(`pty-status-${sessionId}`, (event) => {
       const status = event.payload.status as SessionStatus;
+      logTerminalExitStatus(session, event.payload);
       set((state) => ({
         sessionStatuses: { ...state.sessionStatuses, [sessionId]: status },
       }));
     });
 
     const newSessions = [...get().sessions, session];
+    const paneResult = addSessionToPaneTree(get().paneTree, get().activePaneId, sessionId, createPaneId);
     set({
       sessions: newSessions,
       activeSessionId: sessionId,
+      paneTree: paneResult.tree,
+      activePaneId: paneResult.activePaneId,
       sessionStatuses: { ...get().sessionStatuses, [sessionId]: "running" },
       statusListeners: { ...get().statusListeners, [sessionId]: unlisten },
     });
@@ -104,7 +336,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       setTimeout(() => {
         invoke("pty_write", { sessionId, data: startupCmd + "\r" }).catch((err) => {
           toast.error("启动命令写入失败", { description: String(err) });
-          logError("Failed to write startup command", { sessionId, startupCmd, err });
+          logError("Failed to write startup command", {
+            sessionId,
+            hasStartupCmd: true,
+            startupCmdSummary: summarizeStartupCmd(startupCmd),
+            err,
+          });
         });
       }, 500);
     }
@@ -113,81 +350,179 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   },
 
   closeSession: async (id) => {
-    const split = get().splits[id];
+    const ptySessionIds = [id];
 
-    if (split) {
-      get().statusListeners[split.secondSessionId]?.();
-      await invoke("pty_close", { sessionId: split.secondSessionId }).catch(() => {});
-    }
-
-    get().statusListeners[id]?.();
-    await invoke("pty_close", { sessionId: id });
-
+    // 必须在 set sessions 之前记录原索引，否则后续 findIndex 永远返回 -1，
+    // 导致 persistedSplits 永远清不掉（历史 bug）。
+    const closedIndex = get().sessions.findIndex((s) => s.id === id);
     const remaining = get().sessions.filter((s) => s.id !== id);
     const newStatuses = { ...get().sessionStatuses };
     const newListeners = { ...get().statusListeners };
-    const newSplits = { ...get().splits };
+    const newNotifications = { ...get().tabNotifications };
+    const newTabStatuses = { ...get().tabStatuses };
+    const newTabStatusDetails = { ...get().tabStatusDetails };
+    const nextPaneTree = removeSessionFromPaneTree(get().paneTree, id);
+    const nextActiveId =
+      get().activeSessionId === id
+        ? findFirstSessionId(nextPaneTree)
+        : get().activeSessionId;
+    const activePane = nextActiveId ? findPaneLeafBySession(nextPaneTree, nextActiveId) : null;
 
     delete newStatuses[id];
     delete newListeners[id];
-    delete newSplits[id];
-    if (split) {
-      delete newStatuses[split.secondSessionId];
-      delete newListeners[split.secondSessionId];
+    delete newNotifications[id];
+    delete newTabStatuses[id];
+    delete newTabStatusDetails[id];
+
+    // Drop in-memory background overrides for closed sessions (R8).
+    const prevHidden = get().hiddenBackgroundSessionIds;
+    let newHidden = prevHidden;
+    if (prevHidden.has(id)) {
+      newHidden = new Set(prevHidden);
+      newHidden.delete(id);
     }
 
-    const newActiveId =
-      get().activeSessionId === id
-        ? remaining[remaining.length - 1]?.id ?? null
-        : get().activeSessionId;
+    get().statusListeners[id]?.();
 
     set({
       sessions: remaining,
-      activeSessionId: newActiveId,
+      activeSessionId: nextActiveId,
+      paneTree: nextPaneTree,
+      activePaneId: activePane?.id ?? collectPaneLeaves(nextPaneTree)[0]?.id ?? null,
       sessionStatuses: newStatuses,
       statusListeners: newListeners,
-      splits: newSplits,
+      tabNotifications: newNotifications,
+      tabStatuses: newTabStatuses,
+      tabStatusDetails: newTabStatusDetails,
+      splits: {},
+      ...(newHidden !== prevHidden ? { hiddenBackgroundSessionIds: newHidden } : {}),
     });
 
-    // 更新持久化
-    await useSessionStore.getState().saveSessions(remaining);
-    await useSessionStore.getState().saveActiveSessionId(newActiveId);
+    try {
+      await useSessionStore.getState().saveSessions(remaining);
+      await useSessionStore.getState().saveActiveSessionId(nextActiveId);
 
-    // 更新 splits（移除已关闭的主会话对应的 split）
-    const persistedSplits = useSessionStore.getState().splits.filter(
-      (s) => s.primarySessionIndex !== get().sessions.findIndex((sess) => sess.id === id)
-    );
-    await useSessionStore.getState().saveSplits(persistedSplits);
+      // 更新 splits（移除已关闭主会话对应的 split），使用关闭前记录的索引
+      if (closedIndex >= 0) {
+        const persistedSplits = useSessionStore.getState().splits.filter(
+          (s) => s.primarySessionIndex !== closedIndex
+        );
+        await useSessionStore.getState().saveSplits(persistedSplits);
+      }
+    } finally {
+      for (const sessionId of ptySessionIds) {
+        void invoke("pty_close", { sessionId }).catch((err) => {
+          logError("pty_close invoke failed while closing terminal tab", { sessionId, err });
+        });
+      }
+    }
   },
 
   setActive: (id) => {
-    set({ activeSessionId: id });
-    useSessionStore.getState().saveActiveSessionId(id).catch(() => {});
+    const paneResult = setPaneActiveSession(get().paneTree, id);
+    set({ activeSessionId: id, paneTree: paneResult.tree, activePaneId: paneResult.activePaneId ?? get().activePaneId });
+    scheduleSaveActiveId(id);
+  },
+
+  markAttentionInputHandled: (sessionId) => {
+    const tabId = resolvePrimaryTabId(sessionId, get().splits);
+    if (get().tabStatuses[tabId]?.hook !== "attention") return;
+    set((state) => buildTabStatusUpdate(state, tabId, "hook", "running", new Date().toISOString()));
+  },
+
+  handleCliHookEvent: (payload) => {
+    const tabId = resolvePrimaryTabId(payload.tabId, get().splits);
+    if (!get().sessions.some((session) => session.id === tabId)) return null;
+    const updatedAt = payload.timestamp ?? new Date().toISOString();
+    const status = mapCliHookEvent(payload.event);
+    if (!status) return tabId;
+    set((state) => {
+      const next = buildTabStatusUpdate(state, tabId, "hook", status, updatedAt);
+      if (status !== "done" && status !== "failed") return next;
+
+      const tabStatus = next.tabStatuses[tabId];
+      if (!tabStatus?.shell) return next;
+      const resolved: TabStatusSources = { ...tabStatus };
+      delete resolved.shell;
+      delete resolved.shellUpdatedAt;
+      return {
+        tabStatuses: { ...next.tabStatuses, [tabId]: resolved },
+        tabNotifications: { ...next.tabNotifications, [tabId]: getTabStatusEntry(resolved) },
+        tabStatusDetails: { ...next.tabStatusDetails, [tabId]: getTabStatusDetails(resolved) },
+      };
+    });
+    return tabId;
+  },
+
+  handleShellRuntimeEvent: (payload) => {
+    const tabId = resolvePrimaryTabId(payload.sessionId, get().splits);
+    const session = get().sessions.find((item) => item.id === tabId);
+    if (!session || !isShellRuntimeMonitoringActive(session.shell)) return null;
+    const status = mapShellRuntimeEvent(payload.event, payload.exitCode ?? null);
+    if (status === "none") return tabId;
+    const updatedAt = payload.timestamp ?? new Date().toISOString();
+    set((state) => buildTabStatusUpdate(state, tabId, "shell", status, updatedAt));
+    return tabId;
   },
 
   reorderSessions: (fromId, toId) => {
-    const list = [...get().sessions];
-    const fromIdx = list.findIndex((s) => s.id === fromId);
-    const toIdx = list.findIndex((s) => s.id === toId);
-    if (fromIdx < 0 || toIdx < 0) return;
-    const [moved] = list.splice(fromIdx, 1);
-    list.splice(toIdx, 0, moved);
-    set({ sessions: list });
-    useSessionStore.getState().saveSessions(list).catch(() => {});
+    const pane = findPaneLeafBySession(get().paneTree, fromId);
+    if (!pane || !pane.sessionIds.includes(toId)) return;
+    const nextTree = reorderSessionInPane(get().paneTree, pane.id, fromId, toId);
+    set({ paneTree: nextTree, activePaneId: pane.id, activeSessionId: fromId });
+    scheduleSaveActiveId(fromId);
   },
 
-  splitTerminal: async (sessionId, direction, cwd, shell) => {
-    if (get().splits[sessionId]) return;
+  moveSessionToPane: (sessionId, targetPaneId, beforeSessionId) => {
+    const sourcePane = findPaneLeafBySession(get().paneTree, sessionId);
+    const targetPane = findPaneLeaf(get().paneTree, targetPaneId);
+    if (!sourcePane || !targetPane || sourcePane.id === targetPane.id) return;
+    const result = moveSessionToPaneTree(get().paneTree, sourcePane.id, targetPane.id, sessionId, beforeSessionId);
+    set({ paneTree: result.tree, activePaneId: result.activePaneId, activeSessionId: sessionId });
+    scheduleSaveActiveId(sessionId);
+  },
 
-    const normalizedInputShell = normalizeShellKey(shell);
+  splitSessionToPaneEdge: (sessionId, targetPaneId, edge) => {
+    const result = splitExistingSessionToPaneEdge(get().paneTree, sessionId, targetPaneId, edge, createPaneId);
+    if (!result.changed) return;
+    set({
+      paneTree: result.tree,
+      activePaneId: result.activePaneId,
+      activeSessionId: result.activeSessionId,
+      splits: {},
+    });
+    scheduleSaveActiveId(result.activeSessionId);
+  },
+
+  renameSession: (id, title) => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    let changed = false;
+    const nextSessions = get().sessions.map((session) => {
+      if (session.id !== id) return session;
+      if (session.title === trimmed) return session;
+      changed = true;
+      return { ...session, title: trimmed };
+    });
+    if (!changed) return;
+    set({ sessions: nextSessions });
+    useSessionStore.getState().saveSessions(nextSessions).catch(() => {});
+  },
+
+  splitTerminal: async (sessionId, direction, options) => {
+    const paneTree = get().paneTree;
+    const targetPane = findPaneLeafBySession(paneTree, sessionId);
+    if (!targetPane || !paneTree) return null;
+
+    const normalizedInputShell = normalizeShellKey(options?.shell);
     const normalizedDefaultShell = normalizeShellKey(useSettingsStore.getState().defaultShell);
-    const resolvedShell = normalizedInputShell ?? (normalizedDefaultShell ?? null);
+    const resolvedShell = normalizedInputShell ?? (options?.projectId ? null : (normalizedDefaultShell ?? null));
 
-    let secondSessionId: string;
+    let splitSessionId: string;
     try {
-      secondSessionId = await invoke<string>("pty_create", {
-        cwd: cwd ?? null,
-        envVars: null,
+      splitSessionId = await invoke<string>("pty_create", {
+        cwd: options?.cwd ?? null,
+        envVars: buildPtyEnvVars(options?.envVars ?? null, resolvedShell),
         shell: resolvedShell,
       });
     } catch (err) {
@@ -195,91 +530,123 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       toast.error("创建分屏终端失败", { description });
       logError("pty_create invoke failed for split terminal", {
         sessionId,
-        cwd: cwd ?? null,
+        cwd: options?.cwd ?? null,
         shell: resolvedShell,
         err,
       });
       throw err;
     }
 
-    const unlisten = await listen<PtyStatusPayload>(`pty-status-${secondSessionId}`, (event) => {
+    const splitSession: TerminalSession = {
+      id: splitSessionId,
+      projectId: options?.projectId,
+      title: createSplitSessionTitle(options),
+      cwd: options?.cwd,
+      shell: resolvedShell,
+      envVars: options?.envVars,
+      startupCmd: options?.startupCmd,
+    };
+
+    const unlisten = await listen<PtyStatusPayload>(`pty-status-${splitSessionId}`, (event) => {
       const status = event.payload.status as SessionStatus;
+      logTerminalExitStatus(splitSession, event.payload);
       set((state) => ({
-        sessionStatuses: { ...state.sessionStatuses, [secondSessionId]: status },
+        sessionStatuses: { ...state.sessionStatuses, [splitSessionId]: status },
       }));
     });
 
+    const paneResult = splitPaneLeaf(paneTree, targetPane.id, direction, splitSessionId, createPaneId);
+    const newSessions = [...get().sessions, splitSession];
     set((state) => ({
-      splits: {
-        ...state.splits,
-        [sessionId]: { direction, secondSessionId, ratio: 0.5 },
-      },
-      sessionStatuses: { ...state.sessionStatuses, [secondSessionId]: "running" },
-      statusListeners: { ...state.statusListeners, [secondSessionId]: unlisten },
+      sessions: newSessions,
+      activeSessionId: splitSessionId,
+      paneTree: paneResult.tree,
+      activePaneId: paneResult.activePaneId,
+      splits: {},
+      sessionStatuses: { ...state.sessionStatuses, [splitSessionId]: "running" },
+      statusListeners: { ...state.statusListeners, [splitSessionId]: unlisten },
     }));
 
-    // 持久化分屏信息
-    const primaryIndex = get().sessions.findIndex((s) => s.id === sessionId);
-    if (primaryIndex >= 0) {
-      const currentSplits = useSessionStore.getState().splits;
-      const newPersistedSplits: PersistedSplit[] = [
-        ...currentSplits.filter((s) => s.primarySessionIndex !== primaryIndex),
-        {
-          primarySessionIndex: primaryIndex,
-          direction,
-          secondSessionCwd: cwd,
-          secondSessionShell: resolvedShell,
-          ratio: 0.5,
-        },
-      ];
-      await useSessionStore.getState().saveSplits(newPersistedSplits);
+    await useSessionStore.getState().saveSessions(newSessions);
+    await useSessionStore.getState().saveActiveSessionId(splitSessionId);
+    await useSessionStore.getState().saveSplits([]);
+
+    if (options?.startupCmd) {
+      setTimeout(() => {
+        invoke("pty_write", { sessionId: splitSessionId, data: options.startupCmd + "\r" }).catch((err) => {
+          toast.error("启动命令写入失败", { description: String(err) });
+          logError("Failed to write split startup command", {
+            sessionId: splitSessionId,
+            hasStartupCmd: true,
+            startupCmdSummary: summarizeStartupCmd(options.startupCmd),
+            err,
+          });
+        });
+      }, 500);
     }
+
+    return splitSessionId;
   },
 
   unsplitTerminal: async (sessionId) => {
-    const split = get().splits[sessionId];
-    if (!split) return;
+    const pane = findPaneLeafBySession(get().paneTree, sessionId);
+    if (!pane) return;
+    const behavior = useSettingsStore.getState().unsplitBehavior;
+    const result = unsplitPaneLeaf(get().paneTree, pane.id, behavior);
+    const closedSessionIds = result.closedSessionIds;
 
-    get().statusListeners[split.secondSessionId]?.();
-    await invoke("pty_close", { sessionId: split.secondSessionId }).catch(() => {});
+    for (const closedSessionId of closedSessionIds) {
+      get().statusListeners[closedSessionId]?.();
+    }
 
     const newStatuses = { ...get().sessionStatuses };
     const newListeners = { ...get().statusListeners };
-    const newSplits = { ...get().splits };
-    delete newStatuses[split.secondSessionId];
-    delete newListeners[split.secondSessionId];
-    delete newSplits[sessionId];
+    const newNotifications = { ...get().tabNotifications };
+    const newTabStatuses = { ...get().tabStatuses };
+    const newTabStatusDetails = { ...get().tabStatusDetails };
+    const newHidden = new Set(get().hiddenBackgroundSessionIds);
+    for (const closedSessionId of closedSessionIds) {
+      delete newStatuses[closedSessionId];
+      delete newListeners[closedSessionId];
+      delete newNotifications[closedSessionId];
+      delete newTabStatuses[closedSessionId];
+      delete newTabStatusDetails[closedSessionId];
+      newHidden.delete(closedSessionId);
+    }
 
-    set({ sessionStatuses: newStatuses, statusListeners: newListeners, splits: newSplits });
+    const closedSet = new Set(closedSessionIds);
+    const remaining = get().sessions.filter((session) => !closedSet.has(session.id));
+    set({
+      sessions: remaining,
+      activeSessionId: result.activeSessionId,
+      paneTree: result.tree,
+      activePaneId: result.activePaneId,
+      sessionStatuses: newStatuses,
+      statusListeners: newListeners,
+      tabNotifications: newNotifications,
+      tabStatuses: newTabStatuses,
+      tabStatusDetails: newTabStatusDetails,
+      splits: {},
+      hiddenBackgroundSessionIds: newHidden,
+    });
 
-    // 更新持久化 splits
-    const primaryIndex = get().sessions.findIndex((s) => s.id === sessionId);
-    const persistedSplits = useSessionStore.getState().splits.filter(
-      (s) => s.primarySessionIndex !== primaryIndex
-    );
-    await useSessionStore.getState().saveSplits(persistedSplits);
+    await useSessionStore.getState().saveSessions(remaining);
+    await useSessionStore.getState().saveActiveSessionId(result.activeSessionId);
+    await useSessionStore.getState().saveSplits([]);
+
+    for (const closedSessionId of closedSessionIds) {
+      void invoke("pty_close", { sessionId: closedSessionId }).catch((err) => {
+        logError("pty_close invoke failed while unsplitting pane", { sessionId: closedSessionId, err });
+      });
+    }
   },
 
-  setSplitRatio: (sessionId, ratio) => {
-    const split = get().splits[sessionId];
-    if (!split) return;
-    const clampedRatio = Math.max(0.2, Math.min(0.8, ratio));
-    set((state) => ({
-      splits: {
-        ...state.splits,
-        [sessionId]: { ...split, ratio: clampedRatio },
-      },
-    }));
+  setSplitRatio: (splitId, ratio) => {
+    set((state) => ({ paneTree: resizePaneSplit(state.paneTree, splitId, ratio) }));
+  },
 
-    // 更新持久化 ratio
-    const primaryIndex = get().sessions.findIndex((s) => s.id === sessionId);
-    if (primaryIndex >= 0) {
-      const currentSplits = useSessionStore.getState().splits;
-      const newPersistedSplits = currentSplits.map((s) =>
-        s.primarySessionIndex === primaryIndex ? { ...s, ratio: clampedRatio } : s
-      );
-      useSessionStore.getState().saveSplits(newPersistedSplits).catch(() => {});
-    }
+  getNextSessionIdForShortcut: (delta) => {
+    return resolveNextSessionIdForShortcut(get().paneTree, get().activePaneId, get().activeSessionId, delta);
   },
 
   restoreSessions: async (projectMap, projectHealth) => {
@@ -290,7 +657,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     try {
       const sessionStore = useSessionStore.getState();
       const persistedSessions = sessionStore.sessions;
-      const persistedSplits = sessionStore.splits;
       const persistedActiveId = sessionStore.activeSessionId;
 
       if (persistedSessions.length === 0) return;
@@ -298,7 +664,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     const restoredSessions: TerminalSession[] = [];
     const restoredStatuses: Record<string, SessionStatus> = {};
     const restoredListeners: Record<string, UnlistenFn> = {};
-    const restoredSplits: Record<string, SplitState> = {};
     const skippedSessions: string[] = [];
 
     const newIdMap: Record<string, string> = {}; // oldId -> newId
@@ -330,7 +695,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       try {
         newSessionId = await invoke<string>("pty_create", {
           cwd: ps.cwd ?? null,
-          envVars: ps.envVars ?? null,
+          envVars: buildPtyEnvVars(ps.envVars ?? null, resolvedShell),
           shell: resolvedShell,
         });
       } catch (err) {
@@ -340,13 +705,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       }
 
       newIdMap[ps.id] = newSessionId;
-
-      const unlisten = await listen<PtyStatusPayload>(`pty-status-${newSessionId}`, (event) => {
-        const status = event.payload.status as SessionStatus;
-        useTerminalStore.setState((state) => ({
-          sessionStatuses: { ...state.sessionStatuses, [newSessionId]: status },
-        }));
-      });
 
       const restoredSession: TerminalSession = {
         id: newSessionId,
@@ -358,6 +716,22 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         startupCmd: ps.startupCmd,
       };
 
+      let unlisten: UnlistenFn;
+      try {
+        unlisten = await listen<PtyStatusPayload>(`pty-status-${newSessionId}`, (event) => {
+          const status = event.payload.status as SessionStatus;
+          logTerminalExitStatus(restoredSession, event.payload);
+          useTerminalStore.setState((state) => ({
+            sessionStatuses: { ...state.sessionStatuses, [newSessionId]: status },
+          }));
+        });
+      } catch (err) {
+        logError("Failed to register status listener", { sessionId: newSessionId, err });
+        await invoke("pty_close", { sessionId: newSessionId }).catch(() => {});
+        skippedSessions.push(ps.title ?? `会话 ${i + 1}`);
+        continue;
+      }
+
       restoredSessions.push(restoredSession);
       restoredStatuses[newSessionId] = "running";
       restoredListeners[newSessionId] = unlisten;
@@ -366,48 +740,15 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       if (ps.startupCmd) {
         setTimeout(() => {
           invoke("pty_write", { sessionId: newSessionId, data: ps.startupCmd + "\r" }).catch((err) => {
-            logError("Failed to write startup command on restore", { sessionId: newSessionId, startupCmd: ps.startupCmd, err });
+            logError("Failed to write startup command on restore", {
+              sessionId: newSessionId,
+              hasStartupCmd: true,
+              startupCmdSummary: summarizeStartupCmd(ps.startupCmd),
+              err,
+            });
           });
         }, 500);
       }
-    }
-
-    // 恢复分屏
-    for (const ps of persistedSplits) {
-      const oldPrimaryId = persistedSessions[ps.primarySessionIndex]?.id;
-      const newPrimaryId = newIdMap[oldPrimaryId];
-      if (!newPrimaryId) continue;
-
-      // 创建第二个终端
-      const normalizedShell = normalizeShellKey(ps.secondSessionShell);
-      const resolvedShell = normalizedShell ?? normalizeShellKey(useSettingsStore.getState().defaultShell) ?? null;
-
-      let secondSessionId: string;
-      try {
-        secondSessionId = await invoke<string>("pty_create", {
-          cwd: ps.secondSessionCwd ?? null,
-          envVars: null,
-          shell: resolvedShell,
-        });
-      } catch (err) {
-        logError("Failed to restore split session", { split: ps, err });
-        continue;
-      }
-
-      const unlisten = await listen<PtyStatusPayload>(`pty-status-${secondSessionId}`, (event) => {
-        const status = event.payload.status as SessionStatus;
-        useTerminalStore.setState((state) => ({
-          sessionStatuses: { ...state.sessionStatuses, [secondSessionId]: status },
-        }));
-      });
-
-      restoredSplits[newPrimaryId] = {
-        direction: ps.direction,
-        secondSessionId,
-        ratio: ps.ratio,
-      };
-      restoredStatuses[secondSessionId] = "running";
-      restoredListeners[secondSessionId] = unlisten;
     }
 
     // 确定恢复后的 activeSessionId
@@ -418,12 +759,18 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       newActiveId = restoredSessions[restoredSessions.length - 1].id;
     }
 
+    const restoredPaneTree = restoredSessions.length > 0
+      ? createSinglePaneTree(restoredSessions.map((session) => session.id), newActiveId, createPaneId)
+      : null;
+
     set({
       sessions: restoredSessions,
       activeSessionId: newActiveId,
+      paneTree: restoredPaneTree,
+      activePaneId: restoredPaneTree?.id ?? null,
       sessionStatuses: restoredStatuses,
       statusListeners: restoredListeners,
-      splits: restoredSplits,
+      splits: {},
     });
 
     // 更新 sessionStore 的持久化数据（使用新 ID）
@@ -431,23 +778,8 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       ...s,
       id: s.id, // 已经是新 ID
     }));
-    const updatedPersistedSplits = persistedSplits
-      .filter((ps) => {
-        const oldPrimaryId = persistedSessions[ps.primarySessionIndex]?.id;
-        return newIdMap[oldPrimaryId] && restoredSplits[newIdMap[oldPrimaryId]];
-      })
-      .map((ps) => {
-        const oldPrimaryId = persistedSessions[ps.primarySessionIndex]?.id;
-        const newPrimaryId = newIdMap[oldPrimaryId];
-        const newPrimaryIndex = restoredSessions.findIndex((s) => s.id === newPrimaryId);
-        return {
-          ...ps,
-          primarySessionIndex: newPrimaryIndex,
-        };
-      });
-
     await sessionStore.saveSessions(updatedPersistedSessions);
-    await sessionStore.saveSplits(updatedPersistedSplits);
+    await sessionStore.saveSplits([]);
     await sessionStore.saveActiveSessionId(newActiveId);
 
     // 显示恢复结果提示
@@ -462,5 +794,21 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     } finally {
       restoreInProgress = false;
     }
+  },
+
+  hideBackgroundForSession: (sessionId) => {
+    const current = get().hiddenBackgroundSessionIds;
+    if (current.has(sessionId)) return;
+    const next = new Set(current);
+    next.add(sessionId);
+    set({ hiddenBackgroundSessionIds: next });
+  },
+
+  showBackgroundForSession: (sessionId) => {
+    const current = get().hiddenBackgroundSessionIds;
+    if (!current.has(sessionId)) return;
+    const next = new Set(current);
+    next.delete(sessionId);
+    set({ hiddenBackgroundSessionIds: next });
   },
 }));

@@ -1,6 +1,7 @@
-import { DndContext, PointerSensor, closestCenter, useSensor, useSensors } from "@dnd-kit/core";
+import { DndContext, DragOverlay, PointerSensor, closestCenter, useSensor, useSensors, type CollisionDetection, type DragStartEvent } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { TreeNode as TNode } from "../../lib/types";
 import { SidebarSkeleton } from "../ui/Skeleton";
 import { EmptyState } from "../ui/EmptyState";
@@ -43,6 +44,55 @@ interface VisibleTreeNode {
 function nodeKey(node: TNode): string {
   return node.type === "group" ? `g:${node.group.id}` : `p:${node.project.id}`;
 }
+
+// 指针在节点行的中部 40% → 命中 into:groupId（进入该分组）
+// 指针在边缘 30%（上/下） → 命中 group 节点本身（触发同层 reorder）
+// 这样可以让用户把分组内项目自然拖到根级（命中根级 group 边缘 = 同层 reorder）
+const treeCollisionDetection: CollisionDetection = (args) => {
+  const collisions = closestCenter(args);
+  const activeId = args.active.id;
+  const filtered = collisions.filter((c) => c.id !== activeId);
+  if (filtered.length === 0) return [];
+
+  const pointer = args.pointerCoordinates;
+  if (pointer) {
+    const containingInto = filtered.find((c) => {
+      if (typeof c.id !== "string" || !c.id.startsWith("into:")) return false;
+      const rect = c.data?.droppableContainer?.rect?.current;
+      return !!rect && pointer.x >= rect.left && pointer.x <= rect.right && pointer.y >= rect.top && pointer.y <= rect.bottom;
+    });
+    if (containingInto) return [containingInto];
+  }
+
+  const pointerY = pointer?.y;
+  const intoIds = new Set<string>();
+  for (const c of filtered) {
+    if (typeof c.id === "string" && c.id.startsWith("into:")) intoIds.add(c.id);
+  }
+
+  // 找最近的非-into 命中（即 sibling 节点）
+  const sibling = filtered.find((c) => typeof c.id !== "string" || !c.id.startsWith("into:"));
+  if (sibling && pointerY != null) {
+    const rect = sibling.data?.droppableContainer?.rect?.current;
+    if (rect) {
+      const ratio = (pointerY - rect.top) / Math.max(1, rect.height);
+      const intoId = `into:${String(sibling.id)}`;
+      // 仅当节点本身是 group（有对应 into:）且指针在中部 30%~70% 时进入它
+      if (intoIds.has(intoId) && ratio >= 0.3 && ratio <= 0.7) {
+        const intoCollision = filtered.find((c) => c.id === intoId);
+        if (intoCollision) return [intoCollision];
+      }
+      return [sibling];
+    }
+  }
+
+  // 没拿到 rect 时，回退到「优先 into:groupId」
+  const intoNonRoot = filtered.find(
+    (c) => typeof c.id === "string" && c.id.startsWith("into:")
+  );
+  if (intoNonRoot) return [intoNonRoot];
+  return [filtered[0]];
+};
 
 function flattenTree(nodes: TNode[], out: CompactItem[] = []): CompactItem[] {
   for (const node of nodes) {
@@ -119,10 +169,20 @@ export function ProjectTree({
   const actions = useTreeActions();
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [focusedNodeKey, setFocusedNodeKey] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const collapsedListRef = useRef<HTMLDivElement | null>(null);
   const visibleNodes = useMemo(
     () => flattenVisibleTree(tree, actions.collapsedIds),
     [actions.collapsedIds, tree]
   );
+  const compactItems = useMemo(() => flattenTree(tree), [tree]);
+  const collapsedRowVirtualizer = useVirtualizer({
+    count: compactItems.length,
+    getScrollElement: () => collapsedListRef.current,
+    estimateSize: () => (density === "compact" ? 32 : 36),
+    overscan: 8,
+    getItemKey: (index) => compactItems[index]?.key ?? index,
+  });
   const visibleNodeIndex = useMemo(() => {
     const map = new Map<string, number>();
     visibleNodes.forEach((node, idx) => map.set(node.key, idx));
@@ -265,18 +325,17 @@ export function ProjectTree({
 
   if (initialLoading) {
     return (
-      <div className="flex-1 overflow-y-auto px-1.5 pb-2 pt-1">
+      <div className="h-full overflow-y-auto px-1.5 pb-2 pt-1">
         <SidebarSkeleton />
       </div>
     );
   }
 
   if (collapsed) {
-    const compactItems = flattenTree(tree);
     const collapsedButtonSize = density === "compact" ? "h-7 w-7" : "h-8 w-8";
     const compactTextSize = density === "compact" ? "text-[11px]" : "text-xs";
     return (
-      <div className={`flex-1 overflow-y-auto ${density === "compact" ? "px-0.5 pb-1.5 pt-0.5" : "px-1 pb-2 pt-1"}`}>
+      <div ref={collapsedListRef} className={`h-full overflow-y-auto ${density === "compact" ? "px-0.5 pb-1.5 pt-0.5" : "px-1 pb-2 pt-1"}`}>
         {compactItems.length === 0 && (
           <div className={`flex flex-col items-center text-text-muted ${density === "compact" ? "gap-1.5 py-2.5" : "gap-2 py-3"}`}>
             <Terminal size={20} strokeWidth={1.2} className="opacity-50" />
@@ -290,52 +349,64 @@ export function ProjectTree({
             </button>
           </div>
         )}
-        {compactItems.map((item) => {
-          if (item.type === "group") {
-            const groupNode = item.node.type === "group" ? item.node : null;
-            if (!groupNode) return null;
-            return (
-              <button
-                key={item.key}
-                className={`ui-flat-action mx-auto my-0.5 px-0 text-primary ${collapsedButtonSize}`}
-                title={item.label}
-                aria-label={`目录 ${item.label}`}
-                onContextMenu={(e) => actions.onContextMenuGroup(e, groupNode.group.id, groupNode.group.name)}
-              >
-                <Folder size={16} strokeWidth={1.5} />
-              </button>
-            );
-          }
-
-          const projectNode = item.node.type === "project" ? item.node : null;
-          if (!projectNode) return null;
-          const project = projectNode.project;
-          const projectInitial = project.name.trim().charAt(0).toUpperCase() || "P";
-          const selected =
-            actions.selectedId === project.id || actions.selectedProjectIds.has(project.id);
-          return (
-            <button
-              key={item.key}
-              className={`mx-auto my-0.5 flex ${collapsedButtonSize} items-center justify-center rounded-md font-semibold transition-colors ${compactTextSize} ${
-                selected
-                  ? "ui-primary-action text-white"
-                  : "bg-surface-container-high text-on-surface-variant hover:bg-surface-container-highest"
-              }`}
-              title={project.name}
-              aria-label={`打开项目 ${project.name}`}
-              onClick={() => actions.onOpenProject(project)}
-              onContextMenu={(e) => actions.onContextMenuProject(e, project)}
-            >
-              {projectInitial}
-            </button>
-          );
-        })}
+        {compactItems.length > 0 && (
+          <div className="relative w-full" style={{ height: collapsedRowVirtualizer.getTotalSize() }}>
+            {collapsedRowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const item = compactItems[virtualRow.index];
+              if (!item) return null;
+              return (
+                <div
+                  key={virtualRow.key}
+                  className="absolute left-0 top-0 w-full"
+                  style={{
+                    height: virtualRow.size,
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                >
+                  {item.type === "group" ? (
+                    <button
+                      className={`ui-flat-action ui-tree-collapsed-item mx-auto my-0.5 px-0 text-primary ${collapsedButtonSize}`}
+                      title={item.label}
+                      aria-label={`目录 ${item.label}`}
+                      onContextMenu={(e) => {
+                        const groupNode = item.node.type === "group" ? item.node : null;
+                        if (groupNode) actions.onContextMenuGroup(e, groupNode.group.id, groupNode.group.name);
+                      }}
+                    >
+                      <Folder size={16} strokeWidth={1.5} />
+                    </button>
+                  ) : (
+                    (() => {
+                      const projectNode = item.node.type === "project" ? item.node : null;
+                      if (!projectNode) return null;
+                      const project = projectNode.project;
+                      const projectInitial = project.name.trim().charAt(0).toUpperCase() || "P";
+                      const selected = actions.selectedId === project.id || actions.selectedProjectIds.has(project.id);
+                      return (
+                        <button
+                          className={`ui-tree-collapsed-item mx-auto my-0.5 flex ${collapsedButtonSize} items-center justify-center rounded-xl font-semibold transition-colors ${compactTextSize}`}
+                          data-selected={selected ? "true" : "false"}
+                          title={project.name}
+                          aria-label={`打开项目 ${project.name}`}
+                          onClick={() => actions.onOpenProject(project)}
+                          onContextMenu={(e) => actions.onContextMenuProject(e, project)}
+                        >
+                          {projectInitial}
+                        </button>
+                      );
+                    })()
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   }
 
   return (
-    <div className={`flex-1 overflow-y-auto ${density === "compact" ? "px-1 pb-1.5 pt-0.5" : "px-1.5 pb-2 pt-1"}`}>
+    <div className={`h-full overflow-y-auto ${density === "compact" ? "px-1 pb-1.5 pt-0.5" : "px-1.5 pb-2 pt-1"}`}>
       {newGroupParentId === "__root__" && (
         <div className={`flex items-center px-2 ${density === "compact" ? "gap-1 py-1" : "gap-1.5 py-1.5"}`}>
           <span className="shrink-0 text-accent">
@@ -345,7 +416,7 @@ export function ProjectTree({
             ref={(ref) => {
               ref?.focus();
             }}
-            className="ui-focus-ring flex-1 rounded-md bg-surface-container-highest px-1.5 py-1 text-xs text-on-surface outline-none"
+            className="ui-tree-inline-input ui-focus-ring h-8 flex-1 px-2 text-xs text-on-surface outline-none"
             onBlur={(e) => {
               const value = e.currentTarget.value.trim();
               if (value) onCreateRootGroup(value);
@@ -366,8 +437,13 @@ export function ProjectTree({
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={(event) => actions.onDragEnd(null, event)}
+        collisionDetection={treeCollisionDetection}
+        onDragStart={(event: DragStartEvent) => setActiveId(String(event.active.id))}
+        onDragCancel={() => setActiveId(null)}
+        onDragEnd={(event) => {
+          setActiveId(null);
+          actions.onDragEnd(event);
+        }}
       >
         <SortableContext
           items={tree.map((n) => (n.type === "group" ? n.group.id : n.project.id))}
@@ -391,6 +467,9 @@ export function ProjectTree({
             ))}
           </div>
         </SortableContext>
+        <DragOverlay dropAnimation={null}>
+          {activeId ? <DragGhost activeId={activeId} tree={tree} /> : null}
+        </DragOverlay>
       </DndContext>
 
       {tree.length === 0 && loadError && (
@@ -410,6 +489,32 @@ export function ProjectTree({
           action={{ label: "快速添加项目", onClick: onQuickAddProject }}
         />
       )}
+    </div>
+  );
+}
+
+function findNodeById(nodes: TNode[], id: string): TNode | null {
+  for (const n of nodes) {
+    if (n.type === "group") {
+      if (n.group.id === id) return n;
+      const found = findNodeById(n.children, id);
+      if (found) return found;
+    } else if (n.project.id === id) {
+      return n;
+    }
+  }
+  return null;
+}
+
+function DragGhost({ activeId, tree }: { activeId: string; tree: TNode[] }) {
+  const node = findNodeById(tree, activeId);
+  if (!node) return null;
+  const label = node.type === "group" ? node.group.name : node.project.name;
+  const icon = node.type === "group" ? <Folder size={14} strokeWidth={1.5} /> : <Terminal size={14} strokeWidth={1.5} />;
+  return (
+    <div className="ui-tree-drag-ghost flex items-center gap-2 rounded-xl border border-border bg-surface-container-high px-3 py-1.5 text-[12px] font-medium shadow-lg">
+      <span className="text-on-surface-variant">{icon}</span>
+      <span className="truncate text-on-surface">{label}</span>
     </div>
   );
 }

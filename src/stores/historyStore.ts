@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { getDb } from "../lib/db";
 import { createPerfMarker } from "../lib/logger";
+import { useSettingsStore } from "./settingsStore";
 import type {
   HistoryPromptItem,
   HistorySearchHit,
@@ -30,9 +31,15 @@ interface MetaPatchInput {
   tags?: string[];
 }
 
+interface OpenHistoryOptions {
+  sourceFilter?: HistorySourceFilter;
+  projectPath?: string | null;
+}
+
 interface HistoryStore {
   isOpen: boolean;
   loadingSessions: boolean;
+  loadingMoreSessions: boolean;
   loadingSessionDetail: boolean;
   searching: boolean;
   loadingPrompts: boolean;
@@ -40,7 +47,10 @@ interface HistoryStore {
   statsError: string | null;
   statsUpdatedAt: number | null;
   sourceFilter: HistorySourceFilter;
+  projectPathFilter: string | null;
   sessions: HistorySessionView[];
+  hasMoreSessions: boolean;
+  sessionListOffset: number;
   activeSessionKey: string | null;
   activeSession: HistorySessionDetail | null;
   globalQuery: string;
@@ -54,12 +64,16 @@ interface HistoryStore {
   focusGlobalSearchSeq: number;
   focusSessionSearchSeq: number;
   ensureMetaTable: () => Promise<void>;
-  openHistory: () => Promise<void>;
+  openHistory: (options?: OpenHistoryOptions) => Promise<void>;
   closeHistory: () => void;
   toggleHistory: () => Promise<void>;
   setSourceFilter: (filter: HistorySourceFilter) => Promise<void>;
+  setProjectPathFilter: (projectPath: string | null) => Promise<void>;
   loadSessions: () => Promise<void>;
+  loadMoreSessions: () => Promise<void>;
   openSession: (sessionKey: string) => Promise<void>;
+  openSearchHit: (hit: HistorySearchHit) => Promise<void>;
+  deleteSession: (sessionKey: string) => Promise<void>;
   setGlobalQuery: (query: string) => void;
   runGlobalSearch: (query: string) => Promise<void>;
   setSessionQuery: (query: string) => void;
@@ -82,9 +96,11 @@ interface HistoryStore {
   triggerSessionSearchFocus: () => void;
 }
 
-const DEFAULT_SESSION_LIMIT = 500;
+const SESSION_PAGE_SIZE = 100;
+const SESSION_PAGE_FETCH_LIMIT = SESSION_PAGE_SIZE + 1;
 const DEFAULT_SEARCH_LIMIT = 120;
 const STATS_CACHE_TTL_MS = 15_000;
+const STATS_CACHE_MAX = 16;
 
 interface StatsCacheEntry {
   payload: HistoryStatsPayload;
@@ -93,6 +109,26 @@ interface StatsCacheEntry {
 }
 
 const statsCache = new Map<string, StatsCacheEntry>();
+
+function statsCacheGet(key: string): StatsCacheEntry | undefined {
+  const entry = statsCache.get(key);
+  if (entry) {
+    // Refresh LRU recency
+    statsCache.delete(key);
+    statsCache.set(key, entry);
+  }
+  return entry;
+}
+
+function statsCacheSet(key: string, entry: StatsCacheEntry): void {
+  if (statsCache.has(key)) {
+    statsCache.delete(key);
+  } else if (statsCache.size >= STATS_CACHE_MAX) {
+    const oldestKey = statsCache.keys().next().value;
+    if (oldestKey !== undefined) statsCache.delete(oldestKey);
+  }
+  statsCache.set(key, entry);
+}
 
 function asString(value: unknown): string {
   if (typeof value === "string") return value;
@@ -309,6 +345,19 @@ function normalizeSourceFilter(filter: HistorySourceFilter): HistorySource | nul
   return filter;
 }
 
+function getHistoryPathArgs(): { claudeConfigDir: string | null; codexConfigDir: string | null } {
+  const settings = useSettingsStore.getState();
+  return {
+    claudeConfigDir: settings.claudeHookConfigDir?.trim() || null,
+    codexConfigDir: settings.codexHookConfigDir?.trim() || null,
+  };
+}
+
+function getHistoryPathCacheKey(): string {
+  const { claudeConfigDir, codexConfigDir } = getHistoryPathArgs();
+  return `${claudeConfigDir ?? "__default__"}|${codexConfigDir ?? "__default__"}`;
+}
+
 function makeSessionKey(source: HistorySource, sessionId: string, filePath: string): string {
   return `${source}:${sessionId}:${filePath}`;
 }
@@ -316,9 +365,10 @@ function makeSessionKey(source: HistorySource, sessionId: string, filePath: stri
 function makeStatsCacheKey(
   source: HistorySourceFilter,
   projectKey: string | null,
-  rangeDays: number
+  rangeDays: number,
+  historyPathKey: string
 ): string {
-  return `${source}|${projectKey ?? "__all__"}|${rangeDays}`;
+  return `${source}|${projectKey ?? "__all__"}|${rangeDays}|${historyPathKey}`;
 }
 
 function sessionsFingerprint(sessions: HistorySessionView[]): string {
@@ -375,6 +425,20 @@ function applyMeta(summaries: HistorySessionSummary[], metaMap: SessionMetaMap):
   return views;
 }
 
+function viewToSummary(view: HistorySessionView): HistorySessionSummary {
+  return {
+    session_id: view.session_id,
+    source: view.source,
+    project_key: view.project_key,
+    title: view.title,
+    file_path: view.file_path,
+    created_at: view.created_at,
+    updated_at: view.updated_at,
+    message_count: view.message_count,
+    branch: view.branch,
+  };
+}
+
 async function readMetaMap(): Promise<SessionMetaMap> {
   const db = await getDb();
   const rows = await db.select<SessionMeta[]>(
@@ -390,6 +454,7 @@ async function readMetaMap(): Promise<SessionMetaMap> {
 export const useHistoryStore = create<HistoryStore>((set, get) => ({
   isOpen: false,
   loadingSessions: false,
+  loadingMoreSessions: false,
   loadingSessionDetail: false,
   searching: false,
   loadingPrompts: false,
@@ -397,7 +462,10 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
   statsError: null,
   statsUpdatedAt: null,
   sourceFilter: "all",
+  projectPathFilter: null,
   sessions: [],
+  hasMoreSessions: false,
+  sessionListOffset: 0,
   activeSessionKey: null,
   activeSession: null,
   globalQuery: "",
@@ -434,15 +502,19 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     );
   },
 
-  openHistory: async () => {
+  openHistory: async (options) => {
+    const nextSourceFilter = options?.sourceFilter ?? get().sourceFilter;
+    const nextProjectPathFilter = options?.projectPath?.trim() || null;
+    const filterChanged = nextSourceFilter !== get().sourceFilter || nextProjectPathFilter !== get().projectPathFilter;
     const hasSessions = get().sessions.length > 0;
     const stopPerf = createPerfMarker("history.open", {
-      sourceFilter: get().sourceFilter,
-      fromCache: hasSessions,
+      sourceFilter: nextSourceFilter,
+      projectPathFilter: nextProjectPathFilter ?? "__all__",
+      fromCache: hasSessions && !filterChanged,
     });
-    set({ isOpen: true });
+    set({ isOpen: true, sourceFilter: nextSourceFilter, projectPathFilter: nextProjectPathFilter });
     try {
-      if (!hasSessions) {
+      if (!hasSessions || filterChanged) {
         await get().loadSessions();
       }
     } finally {
@@ -465,10 +537,15 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
   setSourceFilter: async (filter) => {
     set({ sourceFilter: filter });
     await get().loadSessions();
-    const query = get().globalQuery.trim();
-    if (query) {
-      await get().runGlobalSearch(query);
-    } else {
+    if (!get().globalQuery.trim()) {
+      set({ searchHits: [] });
+    }
+  },
+
+  setProjectPathFilter: async (projectPath) => {
+    set({ projectPathFilter: projectPath?.trim() || null });
+    await get().loadSessions();
+    if (!get().globalQuery.trim()) {
       set({ searchHits: [] });
     }
   },
@@ -476,17 +553,23 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
   loadSessions: async () => {
     const stopPerf = createPerfMarker("history.sessions.load", {
       sourceFilter: get().sourceFilter,
+      projectPathFilter: get().projectPathFilter ?? "__all__",
     });
-    set({ loadingSessions: true });
+    set({ loadingSessions: true, loadingMoreSessions: false, hasMoreSessions: false, sessionListOffset: 0 });
     try {
       await get().ensureMetaTable();
       const source = normalizeSourceFilter(get().sourceFilter);
+      const historyPathArgs = getHistoryPathArgs();
       const summariesRaw = await invoke<unknown[]>("history_list_sessions", {
         source,
+        ...historyPathArgs,
+        projectPath: get().projectPathFilter,
         query: null,
-        limit: DEFAULT_SESSION_LIMIT,
+        limit: SESSION_PAGE_FETCH_LIMIT,
+        offset: 0,
       });
-      const summaries = (summariesRaw ?? []).map((item) => normalizeSummary(item));
+      const allSummaries = (summariesRaw ?? []).map((item) => normalizeSummary(item));
+      const summaries = allSummaries.slice(0, SESSION_PAGE_SIZE);
       const metaMap = await readMetaMap();
       const sessions = applyMeta(summaries, metaMap);
       const activeSessionKey = get().activeSessionKey;
@@ -497,6 +580,8 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       set({
         sessions,
         metaMap,
+        hasMoreSessions: allSummaries.length > SESSION_PAGE_SIZE,
+        sessionListOffset: summaries.length,
         activeSessionKey: nextActiveKey,
         activeSession: activeExists ? get().activeSession : null,
         focusedMessageIndex: null,
@@ -509,6 +594,55 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       stopPerf({
         sessionCount: get().sessions.length,
         activeSessionKey: get().activeSessionKey,
+        hasMoreSessions: get().hasMoreSessions,
+      });
+    }
+  },
+
+  loadMoreSessions: async () => {
+    if (get().loadingSessions || get().loadingMoreSessions || !get().hasMoreSessions) return;
+    const offset = get().sessionListOffset;
+    const stopPerf = createPerfMarker("history.sessions.load", {
+      sourceFilter: get().sourceFilter,
+      projectPathFilter: get().projectPathFilter ?? "__all__",
+      mode: "loadMore",
+      offset,
+    });
+    set({ loadingMoreSessions: true });
+    try {
+      await get().ensureMetaTable();
+      const source = normalizeSourceFilter(get().sourceFilter);
+      const historyPathArgs = getHistoryPathArgs();
+      const summariesRaw = await invoke<unknown[]>("history_list_sessions", {
+        source,
+        ...historyPathArgs,
+        projectPath: get().projectPathFilter,
+        query: null,
+        limit: SESSION_PAGE_FETCH_LIMIT,
+        offset,
+      });
+      const allSummaries = (summariesRaw ?? []).map((item) => normalizeSummary(item));
+      const nextSummaries = allSummaries.slice(0, SESSION_PAGE_SIZE);
+      const summaryMap = new Map<string, HistorySessionSummary>();
+      for (const session of get().sessions) {
+        summaryMap.set(session.sessionKey, viewToSummary(session));
+      }
+      for (const summary of nextSummaries) {
+        summaryMap.set(makeSessionKey(summary.source, summary.session_id, summary.file_path), summary);
+      }
+      const metaMap = await readMetaMap();
+      const sessions = applyMeta(Array.from(summaryMap.values()), metaMap);
+      set({
+        sessions,
+        metaMap,
+        hasMoreSessions: allSummaries.length > SESSION_PAGE_SIZE,
+        sessionListOffset: offset + nextSummaries.length,
+      });
+    } finally {
+      set({ loadingMoreSessions: false });
+      stopPerf({
+        sessionCount: get().sessions.length,
+        hasMoreSessions: get().hasMoreSessions,
       });
     }
   },
@@ -524,6 +658,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     try {
       const detailRaw = await invoke<unknown>("history_get_session", {
         filePath: target.file_path,
+        ...getHistoryPathArgs(),
         source: target.source,
         projectKey: target.project_key,
       });
@@ -534,6 +669,81 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       stopPerf({
         messageCount: get().activeSession?.messages.length ?? 0,
       });
+    }
+  },
+
+  openSearchHit: async (hit) => {
+    const sessionKey = makeSessionKey(hit.source, hit.session_id, hit.file_path);
+    const stopPerf = createPerfMarker("history.session.detail", { sessionKey, fromSearch: true });
+    set({ activeSessionKey: sessionKey, loadingSessionDetail: true, focusedMessageIndex: null });
+    try {
+      const detailRaw = await invoke<unknown>("history_get_session", {
+        filePath: hit.file_path,
+        ...getHistoryPathArgs(),
+        source: hit.source,
+        projectKey: hit.project_key,
+      });
+      const detail = normalizeDetail(detailRaw);
+      const exists = get().sessions.some((item) => item.sessionKey === sessionKey);
+      if (exists) {
+        set({ activeSession: detail });
+        return;
+      }
+
+      const summary: HistorySessionSummary = {
+        session_id: hit.session_id,
+        source: hit.source,
+        project_key: hit.project_key,
+        title: detail.title,
+        file_path: hit.file_path,
+        created_at: detail.created_at,
+        updated_at: detail.updated_at,
+        message_count: detail.message_count,
+        branch: detail.branch,
+      };
+      const metaMap = get().metaMap;
+      const summaries = [...get().sessions.map((item) => viewToSummary(item)), summary];
+      set({
+        activeSession: detail,
+        sessions: applyMeta(summaries, metaMap),
+      });
+    } finally {
+      set({ loadingSessionDetail: false });
+      stopPerf({
+        messageCount: get().activeSession?.messages.length ?? 0,
+      });
+    }
+  },
+
+  deleteSession: async (sessionKey) => {
+    const target = get().sessions.find((item) => item.sessionKey === sessionKey);
+    if (!target) return;
+
+    await invoke("history_delete_session", {
+      filePath: target.file_path,
+      ...getHistoryPathArgs(),
+      source: target.source,
+      projectKey: target.project_key,
+    });
+
+    const db = await getDb();
+    await db.execute("DELETE FROM session_meta WHERE session_key = $1", [sessionKey]);
+
+    const sessions = get().sessions.filter((item) => item.sessionKey !== sessionKey);
+    const metaMap = { ...get().metaMap };
+    delete metaMap[sessionKey];
+    const activeWasDeleted = get().activeSessionKey === sessionKey;
+    const nextActiveKey = activeWasDeleted ? sessions[0]?.sessionKey ?? null : get().activeSessionKey;
+    set({
+      sessions,
+      metaMap,
+      activeSessionKey: nextActiveKey,
+      activeSession: activeWasDeleted ? null : get().activeSession,
+      searchHits: get().searchHits.filter((hit) => makeSessionKey(hit.source, hit.session_id, hit.file_path) !== sessionKey),
+      focusedMessageIndex: null,
+    });
+    if (nextActiveKey && activeWasDeleted) {
+      await get().openSession(nextActiveKey);
     }
   },
 
@@ -555,6 +765,8 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       const hitsRaw = await invoke<unknown[]>("history_search", {
         query: normalized,
         source,
+        ...getHistoryPathArgs(),
+        projectPath: get().projectPathFilter,
         limit: DEFAULT_SEARCH_LIMIT,
       });
       const hits = (hitsRaw ?? []).map((item) => normalizeHit(item));
@@ -578,6 +790,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       const promptsRaw = await invoke<unknown[]>("history_list_prompts", {
         scope,
         source,
+        ...getHistoryPathArgs(),
         query: query?.trim() || null,
         projectKey: projectKey?.trim() || null,
         filePath: session?.file_path ?? null,
@@ -595,10 +808,12 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     const rangeDays = options?.rangeDays ?? 30;
     const force = options?.force ?? false;
     const sourceFilter = get().sourceFilter;
-    const cacheKey = makeStatsCacheKey(sourceFilter, projectKey, rangeDays);
+    const historyPathArgs = getHistoryPathArgs();
+    const historyPathKey = getHistoryPathCacheKey();
+    const cacheKey = makeStatsCacheKey(sourceFilter, projectKey, rangeDays, historyPathKey);
     const now = Date.now();
     const fingerprint = sessionsFingerprint(get().sessions);
-    const cached = statsCache.get(cacheKey);
+    const cached = statsCacheGet(cacheKey);
     const stopPerf = createPerfMarker("stats.load", {
       sourceFilter,
       projectKey: projectKey ?? "__all__",
@@ -628,12 +843,13 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       const source = normalizeSourceFilter(sourceFilter);
       const statsRaw = await invoke<unknown>("history_get_stats", {
         source,
+        ...historyPathArgs,
         projectKey,
         rangeDays,
       });
       const payload = normalizeStats(statsRaw);
       const cachedAt = Date.now();
-      statsCache.set(cacheKey, {
+      statsCacheSet(cacheKey, {
         payload,
         cachedAt,
         sessionsFingerprint: fingerprint,

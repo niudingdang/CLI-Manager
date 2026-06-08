@@ -5,3 +5,5 @@ pub mod shell;
 pub mod history;
 pub mod sync;
 pub mod version;
+pub mod background;
+pub mod hook_settings;

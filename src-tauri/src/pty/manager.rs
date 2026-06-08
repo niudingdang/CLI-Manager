@@ -1,17 +1,40 @@
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use log::{debug, error, info};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle;
 use tauri::{AppHandle, Emitter};
-use log::{debug, error, info};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+
+use crate::pty::boundary::safe_emit_boundary;
+use crate::shell_resolver::{resolve_git_bash_exe, GIT_BASH_NOT_FOUND_MESSAGE};
+
+/// Reader 累积阈值：达到该阈值或下游显式没有更多数据时才 emit，避免高吞吐时
+/// 每次 read 都触发一次 IPC + Base64 编码。
+const READER_FLUSH_THRESHOLD: usize = 32 * 1024;
+const READER_BUF_SIZE: usize = 16 * 1024;
+const MIN_PTY_COLS: u16 = 40;
+const MIN_PTY_ROWS: u16 = 8;
 
 pub struct PtySession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    diagnostics: Arc<Mutex<PtySessionDiagnostics>>,
+    reader_handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct PtySessionDiagnostics {
+    session_id: String,
+    shell: String,
+    exe: String,
+    cwd: Option<String>,
+    last_resize_cols: Option<u16>,
+    last_resize_rows: Option<u16>,
 }
 
 #[derive(Clone, Serialize)]
@@ -21,26 +44,83 @@ pub struct PtyProcessStatus {
 }
 
 pub struct PtyManager {
-    sessions: Mutex<HashMap<String, PtySession>>,
+    sessions: RwLock<HashMap<String, Arc<Mutex<PtySession>>>>,
     statuses: Arc<Mutex<HashMap<String, PtyProcessStatus>>>,
 }
 
 impl PtyManager {
     pub fn new() -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
             statuses: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn resolve_shell(shell: &str) -> (&'static str, Option<&'static str>) {
+    fn resolve_shell(shell: &str) -> Result<(String, Vec<String>), String> {
         match shell {
-            "cmd" => ("cmd.exe", Some("/Q")),
-            "pwsh" => ("pwsh.exe", Some("-NoLogo")),
-            "wsl" => ("wsl.exe", None),
-            "bash" => ("bash.exe", None),
-            _ => ("powershell.exe", Some("-NoLogo")),
+            "cmd" => Ok(("cmd.exe".to_string(), vec!["/Q".to_string()])),
+            "pwsh" => Ok(("pwsh.exe".to_string(), vec!["-NoLogo".to_string()])),
+            "wsl" => Ok(("wsl.exe".to_string(), Vec::new())),
+            "gitbash" => resolve_git_bash_exe()
+                .map(|path| (path.to_string_lossy().into_owned(), Vec::new()))
+                .ok_or_else(|| GIT_BASH_NOT_FOUND_MESSAGE.to_string()),
+            "bash" => Ok(("bash.exe".to_string(), Vec::new())),
+            _ => Ok(("powershell.exe".to_string(), vec!["-NoLogo".to_string()])),
         }
+    }
+
+    fn shell_runtime_monitoring_enabled(env_vars: Option<&HashMap<String, String>>) -> bool {
+        env_vars
+            .and_then(|vars| vars.get("CLI_MANAGER_SHELL_RUNTIME_MONITORING"))
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    }
+
+    fn powershell_runtime_monitor_args() -> Vec<String> {
+        let script = r#"
+$global:CliManagerPromptInitialized = $false
+$global:CliManagerPreviousPrompt = if (Test-Path function:\prompt) { (Get-Command prompt).ScriptBlock } else { $null }
+function global:__CliManagerEmitRuntimeEvent([string]$Event, $ExitCode) {
+  $esc = [char]27
+  $bel = [char]7
+  $payload = "$esc]777;cli-manager;session=$env:CLI_MANAGER_TAB_ID;event=$Event"
+  if ($null -ne $ExitCode) { $payload = "$payload;exit=$ExitCode" }
+  [Console]::Write($payload + $bel)
+}
+function global:prompt {
+  $success = $?
+  $nativeExitCode = $global:LASTEXITCODE
+  if ($global:CliManagerPromptInitialized) {
+    $exitCode = if ($success) { 0 } elseif ($nativeExitCode -is [int] -and $nativeExitCode -ne 0) { $nativeExitCode } else { 1 }
+    __CliManagerEmitRuntimeEvent 'command_finished' $exitCode
+  }
+  __CliManagerEmitRuntimeEvent 'prompt_shown' $null
+  $global:CliManagerPromptInitialized = $true
+  if ($global:CliManagerPreviousPrompt) { & $global:CliManagerPreviousPrompt } else { 'PS ' + (Get-Location) + '> ' }
+}
+"#;
+        vec![
+            "-NoLogo".to_string(),
+            "-NoExit".to_string(),
+            "-Command".to_string(),
+            script.to_string(),
+        ]
+    }
+
+    fn build_shell_args(
+        shell: &str,
+        env_vars: Option<&HashMap<String, String>>,
+    ) -> Result<(String, Vec<String>), String> {
+        let monitoring_enabled = Self::shell_runtime_monitoring_enabled(env_vars);
+        if monitoring_enabled && (shell == "powershell" || shell == "pwsh") {
+            let exe = if shell == "pwsh" {
+                "pwsh.exe"
+            } else {
+                "powershell.exe"
+            };
+            return Ok((exe.to_string(), Self::powershell_runtime_monitor_args()));
+        }
+        Self::resolve_shell(shell)
     }
 
     pub fn create(
@@ -69,10 +149,17 @@ impl PtyManager {
                 e.to_string()
             })?;
 
-        let (exe, arg) = Self::resolve_shell(shell.unwrap_or("powershell"));
-        let mut cmd = CommandBuilder::new(exe);
-        if let Some(a) = arg {
-            cmd.arg(a);
+        let shell_key = shell.unwrap_or("powershell");
+        let (exe, args) = Self::build_shell_args(shell_key, env_vars.as_ref()).map_err(|e| {
+            error!(
+                "pty resolve shell failed: id={}, shell={}, error={}",
+                session_id, shell_key, e
+            );
+            e
+        })?;
+        let mut cmd = CommandBuilder::new(&exe);
+        for arg in args {
+            cmd.arg(arg);
         }
 
         if let Some(dir) = cwd {
@@ -103,10 +190,19 @@ impl PtyManager {
         })?;
 
         let child = Arc::new(Mutex::new(child));
+        let diagnostics = Arc::new(Mutex::new(PtySessionDiagnostics {
+            session_id: session_id.to_string(),
+            shell: shell.unwrap_or("powershell").to_string(),
+            exe: exe.to_string(),
+            cwd: cwd.map(str::to_string),
+            last_resize_cols: None,
+            last_resize_rows: None,
+        }));
         let output_event = format!("pty-output-{session_id}");
         let status_event = format!("pty-status-{session_id}");
         let status_map = self.statuses.clone();
         let child_for_thread = child.clone();
+        let diagnostics_for_thread = diagnostics.clone();
         let session_id_owned = session_id.to_string();
 
         self.statuses.lock().unwrap().insert(
@@ -117,38 +213,101 @@ impl PtyManager {
             },
         );
 
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
+        let reader_handle = std::thread::spawn(move || {
+            let mut buf = [0u8; READER_BUF_SIZE];
+            let mut pending: Vec<u8> = Vec::with_capacity(READER_FLUSH_THRESHOLD * 2);
+            let mut reader_end_reason = "eof".to_string();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        // Base64 encode raw bytes to preserve all control characters (including ESC)
-                        let encoded = STANDARD.encode(&buf[..n]);
-                        let _ = app_handle.emit(&output_event, encoded);
+                        pending.extend_from_slice(&buf[..n]);
+                        // 动态批量：buffer 被读满意味着可能还有更多数据，先累积；
+                        // 反之或累计已超阈值就立即 emit，避免延迟。
+                        let likely_more = n == buf.len();
+                        if !likely_more || pending.len() >= READER_FLUSH_THRESHOLD {
+                            // 关键：仅 emit 处于 UTF-8 + ANSI 序列边界的安全前缀，
+                            // 残尾保留到下一轮拼接，避免前端 xterm 把残字节解读为 SGR 参数。
+                            let safe = safe_emit_boundary(&pending);
+                            if safe > 0 {
+                                let encoded = STANDARD.encode(&pending[..safe]);
+                                let _ = app_handle.emit(&output_event, encoded);
+                                pending.drain(..safe);
+                            } else if pending.len() > READER_FLUSH_THRESHOLD * 8 {
+                                // 极端兜底：未终结序列超 256KB（远大于任何正常 OSC/CSI），
+                                // 说明源端格式异常，强制 emit 避免内存无限增长。
+                                debug!(
+                                    "pty pending buffer overflowed boundary protection: id={}, len={}",
+                                    session_id_owned, pending.len()
+                                );
+                                let encoded = STANDARD.encode(&pending);
+                                let _ = app_handle.emit(&output_event, encoded);
+                                pending.clear();
+                            }
+                        }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        reader_end_reason = format!("read_error: {e}");
+                        break;
+                    }
                 }
+            }
+            // 进程退出，把剩余数据全部发出去（不再保护边界，最后一帧）
+            if !pending.is_empty() {
+                let encoded = STANDARD.encode(&pending);
+                let _ = app_handle.emit(&output_event, encoded);
+                pending.clear();
             }
 
             // Process exited — check exit status
-            let new_status = match child_for_thread.lock().unwrap().try_wait() {
-                Ok(Some(exit)) => PtyProcessStatus {
-                    status: "exited".to_string(),
-                    exit_code: Some(exit.exit_code() as i32),
-                },
-                Ok(None) => PtyProcessStatus {
-                    status: "exited".to_string(),
-                    exit_code: None,
-                },
-                Err(_) => PtyProcessStatus {
-                    status: "error".to_string(),
-                    exit_code: None,
-                },
-            };
+            let (new_status, child_exit_status, child_exit_code_raw, child_wait_error) =
+                match child_for_thread.lock().unwrap().try_wait() {
+                    Ok(Some(exit)) => {
+                        let exit_code = exit.exit_code();
+                        (
+                            PtyProcessStatus {
+                                status: "exited".to_string(),
+                                exit_code: Some(exit_code as i32),
+                            },
+                            Some(format!("{exit:?}")),
+                            Some(exit_code),
+                            None,
+                        )
+                    }
+                    Ok(None) => (
+                        PtyProcessStatus {
+                            status: "exited".to_string(),
+                            exit_code: None,
+                        },
+                        None,
+                        None,
+                        None,
+                    ),
+                    Err(e) => (
+                        PtyProcessStatus {
+                            status: "error".to_string(),
+                            exit_code: None,
+                        },
+                        None,
+                        None,
+                        Some(e.to_string()),
+                    ),
+                };
+            let diagnostics = diagnostics_for_thread.lock().unwrap().clone();
             info!(
-                "pty session exited: id={}, status={}, exit_code={:?}",
-                session_id_owned, new_status.status, new_status.exit_code
+                "pty reader ended: reason={}, id={}, status={}, exit_code={:?}, child_exit_status={:?}, child_exit_code_raw={:?}, shell={}, exe={}, cwd={:?}, last_resize_cols={:?}, last_resize_rows={:?}, child_wait_error={:?}",
+                reader_end_reason,
+                diagnostics.session_id,
+                new_status.status,
+                new_status.exit_code,
+                child_exit_status,
+                child_exit_code_raw,
+                diagnostics.shell,
+                diagnostics.exe,
+                diagnostics.cwd,
+                diagnostics.last_resize_cols,
+                diagnostics.last_resize_rows,
+                child_wait_error
             );
 
             if let Ok(mut statuses) = status_map.lock() {
@@ -160,13 +319,15 @@ impl PtyManager {
             let _ = app_handle.emit(&status_event, new_status);
         });
 
-        let session = PtySession {
+        let session = Arc::new(Mutex::new(PtySession {
             writer,
             master: pair.master,
             child,
-        };
+            diagnostics,
+            reader_handle: Some(reader_handle),
+        }));
         self.sessions
-            .lock()
+            .write()
             .unwrap()
             .insert(session_id.to_string(), session);
         info!("pty session ready: id={}", session_id);
@@ -174,21 +335,20 @@ impl PtyManager {
     }
 
     pub fn write(&self, session_id: &str, data: &str) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| {
-                let msg = format!("Session {session_id} not found");
-                error!("pty write failed: {}", msg);
-                msg
-            })?;
-        session
-            .writer
-            .write_all(data.as_bytes())
-            .map_err(|e| {
-                error!("pty write failed: session_id={}, error={}", session_id, e);
-                e.to_string()
-            })?;
+        let session_arc = {
+            let sessions = self.sessions.read().unwrap();
+            sessions.get(session_id).cloned()
+        }
+        .ok_or_else(|| {
+            let msg = format!("Session {session_id} not found");
+            error!("pty write failed: {}", msg);
+            msg
+        })?;
+        let mut session = session_arc.lock().unwrap();
+        session.writer.write_all(data.as_bytes()).map_err(|e| {
+            error!("pty write failed: session_id={}, error={}", session_id, e);
+            e.to_string()
+        })?;
         session.writer.flush().map_err(|e| {
             error!("pty flush failed: session_id={}, error={}", session_id, e);
             e.to_string()
@@ -197,18 +357,26 @@ impl PtyManager {
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), String> {
-        let sessions = self.sessions.lock().unwrap();
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| {
-                let msg = format!("Session {session_id} not found");
-                error!("pty resize failed: {}", msg);
-                msg
-            })?;
+        let session_arc = {
+            let sessions = self.sessions.read().unwrap();
+            sessions.get(session_id).cloned()
+        }
+        .ok_or_else(|| {
+            let msg = format!("Session {session_id} not found");
+            error!("pty resize failed: {}", msg);
+            msg
+        })?;
+        let session = session_arc.lock().unwrap();
+        let cols = cols.max(MIN_PTY_COLS);
+        let rows = rows.max(MIN_PTY_ROWS);
         debug!(
             "pty resize: session_id={}, cols={}, rows={}",
             session_id, cols, rows
         );
+        if let Ok(mut diagnostics) = session.diagnostics.lock() {
+            diagnostics.last_resize_cols = Some(cols);
+            diagnostics.last_resize_rows = Some(rows);
+        }
         session
             .master
             .resize(PtySize {
@@ -224,12 +392,23 @@ impl PtyManager {
     }
 
     pub fn close(&self, session_id: &str) -> Result<(), String> {
-        let session = {
-            let mut sessions = self.sessions.lock().unwrap();
+        let session_arc = {
+            let mut sessions = self.sessions.write().unwrap();
             sessions.remove(session_id)
         };
-        if let Some(session) = session {
-            let _ = session.child.lock().unwrap().kill();
+        if let Some(session_arc) = session_arc {
+            // Kill child first, take reader handle out, then drop the Arc.
+            // Dropping the last Arc releases the master PTY, which causes the
+            // reader thread to observe EOF and exit promptly.
+            let reader_handle = {
+                let mut session = session_arc.lock().unwrap();
+                let _ = session.child.lock().unwrap().kill();
+                session.reader_handle.take()
+            };
+            drop(session_arc);
+            if let Some(handle) = reader_handle {
+                let _ = handle.join();
+            }
             info!("pty session killed: id={}", session_id);
         } else {
             debug!("pty close requested for missing session: id={}", session_id);

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  DEFAULT_KEYBOARD_SHORTCUTS,
   useSettingsStore,
   type ShortcutAction,
   type KeyboardShortcutMap,
+  type TabSwitchShortcutModifier,
+  type TerminalNewlineShortcut,
 } from "../../../stores/settingsStore";
 import { eventToCombo } from "../../../hooks/useKeyboardShortcuts";
 
@@ -12,15 +15,20 @@ const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   nextTab: "下一个标签",
   prevTab: "上一个标签",
   commandPalette: "命令面板",
+  toggleTerminalFullscreen: "终端全屏",
 };
 
-const DEFAULT_SHORTCUTS: KeyboardShortcutMap = {
-  newTerminal: "Ctrl+Shift+T",
-  closeTerminal: "Ctrl+W",
-  nextTab: "Ctrl+Tab",
-  prevTab: "Ctrl+Shift+Tab",
-  commandPalette: "Ctrl+P",
-};
+const TERMINAL_NEWLINE_OPTIONS: { value: TerminalNewlineShortcut; label: string }[] = [
+  { value: "Shift+Enter", label: "Shift + Enter" },
+  { value: "Ctrl+Enter", label: "Ctrl + Enter" },
+  { value: "Alt+Enter", label: "Alt + Enter" },
+];
+
+const TAB_SWITCH_OPTIONS: { value: TabSwitchShortcutModifier; label: string }[] = [
+  { value: "Alt", label: "Alt + 方向键" },
+  { value: "Ctrl", label: "Ctrl + 方向键" },
+  { value: "Shift", label: "Shift + 方向键" },
+];
 
 interface ShortcutSettingsPageProps {
   searchValue: string;
@@ -28,8 +36,28 @@ interface ShortcutSettingsPageProps {
 
 export function ShortcutSettingsPage({ searchValue }: ShortcutSettingsPageProps) {
   const shortcuts = useSettingsStore((s) => s.keyboardShortcuts);
+  const terminalNewlineShortcut = useSettingsStore((s) => s.terminalNewlineShortcut);
   const update = useSettingsStore((s) => s.update);
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
+
+  const currentTabSwitchModifier = useMemo<TabSwitchShortcutModifier | null>(() => {
+    const option = TAB_SWITCH_OPTIONS.find(
+      (opt) => shortcuts.prevTab === `${opt.value}+ArrowLeft` && shortcuts.nextTab === `${opt.value}+ArrowRight`
+    );
+    return option?.value ?? null;
+  }, [shortcuts.prevTab, shortcuts.nextTab]);
+
+  const updateTabSwitchModifier = useCallback(
+    (modifier: TabSwitchShortcutModifier) => {
+      void update("keyboardShortcuts", {
+        ...shortcuts,
+        prevTab: `${modifier}+ArrowLeft`,
+        nextTab: `${modifier}+ArrowRight`,
+      });
+      setRecording(null);
+    },
+    [shortcuts, update]
+  );
 
   const handleRecord = useCallback(
     (event: KeyboardEvent) => {
@@ -52,7 +80,7 @@ export function ShortcutSettingsPage({ searchValue }: ShortcutSettingsPageProps)
   }, [recording, handleRecord]);
 
   const resetDefaults = () => {
-    void update("keyboardShortcuts", DEFAULT_SHORTCUTS);
+    void update("keyboardShortcuts", DEFAULT_KEYBOARD_SHORTCUTS);
     setRecording(null);
   };
 
@@ -86,6 +114,71 @@ export function ShortcutSettingsPage({ searchValue }: ShortcutSettingsPageProps)
 
   return (
     <div className="space-y-4">
+      <section className="ui-surface-card rounded-2xl border border-border p-4">
+        <div className="mb-1 text-sm font-semibold text-on-surface">终端键位</div>
+        <div className="mb-3 text-[11px] text-on-surface-variant">
+          在终端中按下该组合键时，向 PTY 发送换行符 <code>\n</code>（适配 Claude Code、Codex 等 AI CLI 的「换行不提交」）。单按 Enter 行为不变。
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {TERMINAL_NEWLINE_OPTIONS.map((opt) => {
+            const active = terminalNewlineShortcut === opt.value;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => {
+                  if (!active) void update("terminalNewlineShortcut", opt.value);
+                }}
+                className="ui-interactive rounded-lg border px-3 py-1.5 text-xs"
+                style={{
+                  borderColor: active ? "var(--primary)" : "var(--border)",
+                  backgroundColor: active
+                    ? "color-mix(in srgb, var(--primary) 12%, var(--surface-container-high) 88%)"
+                    : "var(--surface-container-high)",
+                  color: active ? "var(--primary)" : "var(--on-surface)",
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="ui-surface-card rounded-2xl border border-border p-4">
+        <div className="mb-1 text-sm font-semibold text-on-surface">终端标签切换</div>
+        <div className="mb-3 text-[11px] text-on-surface-variant">
+          左方向键切到上一个标签，右方向键切到下一个标签。
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {TAB_SWITCH_OPTIONS.map((opt) => {
+            const active = currentTabSwitchModifier === opt.value;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => {
+                  if (!active) updateTabSwitchModifier(opt.value);
+                }}
+                className="ui-interactive rounded-lg border px-3 py-1.5 text-xs"
+                style={{
+                  borderColor: active ? "var(--primary)" : "var(--border)",
+                  backgroundColor: active
+                    ? "color-mix(in srgb, var(--primary) 12%, var(--surface-container-high) 88%)"
+                    : "var(--surface-container-high)",
+                  color: active ? "var(--primary)" : "var(--on-surface)",
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+        {currentTabSwitchModifier === null && (
+          <div className="mt-2 text-[11px] text-on-surface-variant">
+            当前为自定义标签切换快捷键，可在下方单独修改。
+          </div>
+        )}
+      </section>
+
       <section className="ui-surface-card rounded-2xl border border-border p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <div className="text-sm font-semibold text-on-surface">快捷键绑定</div>

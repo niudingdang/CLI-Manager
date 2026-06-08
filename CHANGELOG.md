@@ -1,5 +1,252 @@
 # Changelog
 
+## [V0.2.4] - 2026-06-05
+
+### JetBrains 风格灵活终端分屏
+
+- 终端工作区升级为运行时 pane tree，支持 Split Right、Split Down、Unsplit、嵌套分屏与拖拽分隔线调整相邻 pane 比例，满足左右、上下及混合嵌套布局。
+- 每个 pane 拥有独立终端 Tab 栏，保留原有运行中脉冲、待处理、失败、完成等状态视觉；支持 pane 内拖拽排序、拖到其它 pane、Move to Other Split，以及 pane 内 Tab 溢出滚动与列表控制。
+- Tab 拖拽新增 DragOverlay 跟随鼠标，并支持落到 pane 中心移动或落到 left/right/top/bottom 边缘以现有 session 创建分屏；边缘落点显示灰色半透明预览，不新建 PTY、不复制 terminal。
+- pane 本地 Tab 操作补齐关闭其它、关闭左侧、关闭右侧等动作，避免多 pane 场景下误影响其它分屏。
+- 分屏入口覆盖终端 Tab 右键菜单、命令面板与侧栏项目树：Tab 分屏可选择空终端或指定项目，侧栏项目树分屏会在新 pane 中直接启动所选项目终端。
+- 终端设置的「终端行为」新增 Unsplit 行为选项，可选择取消分屏时合并到相邻 pane，或关闭当前 pane 内会话。
+- 本版本分屏布局仅在运行时生效，不做 pane 布局持久化与重启恢复，避免引入不必要的恢复复杂度。
+
+### 终端输出搜索
+
+- 内嵌 xterm 接入 `@xterm/addon-search`，支持在终端输出中实时搜索并高亮匹配内容。
+- 新增 `Ctrl+F` 搜索浮层，展示匹配计数，并支持上一个 / 下一个结果导航。
+- 搜索浮层会跟随终端主题；关闭后清理高亮并把焦点恢复到当前终端。
+
+### 终端紧凑版
+
+- 收紧终端顶部工具栏与终端区域外层留白，降低内嵌终端的卡片感。
+- 终端内容区去掉单侧 padding，避免普通模式和背景图模式出现不一致的左侧空隙。
+- 同步更新 npm、Tauri 与 Rust 版本元信息到 `0.2.4`。
+
+## [V0.2.2] - 2026-06-04
+
+### Hook 自定义目录联动历史统计
+
+- Claude / Codex Hook 设置中的自定义配置目录会同步用于历史会话读取：Claude 读取 `<配置目录>/projects`，Codex 读取 `<配置目录>/sessions`。
+- 历史列表、搜索、会话详情、删除、Prompt 列表与分析看板统计统一使用同一套历史根目录解析，避免不同入口读取结果不一致。
+- 历史索引、文件扫描与前端统计缓存按 Claude / Codex 目录隔离，切换目录后不会继续命中旧目录数据。
+
+## [V0.2.1] - 2026-06-03
+
+### 会话历史增强
+
+- 会话历史从当前终端 Tab 打开时默认按当前项目过滤，并根据项目配置的 CLI 工具自动选择 Claude / Codex 来源；左上角新增项目筛选，可在全部项目与具体项目之间切换。
+- 会话历史列表新增删除入口，删除前二次确认，并通过 Rust 后端校验历史文件边界后删除本地 JSONL 文件，同时清理前端状态、会话元数据与历史缓存。
+- 历史列表与全局搜索支持按项目路径过滤，兼容 Claude 项目 key 与 Claude / Codex JSONL 中的工作目录信息。
+
+### 会话历史 Tab 交互修复
+
+- 会话历史作为独立 Tab 保持打开时，切回历史 Tab 不再重新查询或重置来源、项目筛选与当前内容。
+- 修复项目筛选“全部项目”空值触发 Radix Select 运行时错误导致历史页黑屏的问题。
+- 修复在会话历史页新建内部终端后不会自动跳转的问题；新建终端会自动激活并显示在会话历史 Tab 右侧。
+
+### 精简模式与命令面板体验
+
+- `npm run dev` 改为通过 `scripts/dev-server.mjs` 启动 Vite：端口 1420 已有 CLI-Manager 开发服务时自动复用，若被其他进程占用则明确报错，减少 Tauri 开发启动冲突。
+- 命令面板接入共享弹层、输入框与卡片样式，并优化分组标题与选中态，使 Ctrl+P 入口与精简模式视觉保持一致。
+- 项目树 CLI 工具徽标改为轻量点状色标，降低 Claude / Codex / Gemini 标识在侧栏中的视觉噪音。
+
+### 性能与启动优化
+
+- 会话历史列表与搜索结果接入虚拟滚动，降低大量历史记录下的 DOM 渲染开销，并保留时间分组、搜索命中与加载更多状态。
+- 应用启动后的自动同步与版本检查延后到首屏完成后执行，减少启动阶段阻塞与首屏抖动。
+- 终端输出写入与渲染路径继续收紧：保留隐藏标签页有界缓冲，并增强 WebGL 渲染失败或上下文丢失后的降级稳定性。
+
+### 项目树与历史列表修复
+
+- 修复折叠分组参与拖拽排序时的交互问题，项目树节点在折叠/展开和拖拽状态下保持一致。
+- 合并远端历史会话改动时保留虚拟列表与删除入口，避免历史列表在合并后丢失性能优化或删除操作。
+- 历史会话查看流程补充路径、来源与项目边界校验，降低跨项目读取历史文件的风险。
+
+## [V0.2.0] - 2026-06-01
+
+### 历史用量统计入口
+
+- 侧栏底部恢复历史用量统计看板入口，点击后全局打开既有分析看板。
+- 移除侧栏底部云同步上传/下载快捷按钮，云同步状态入口保留并跳转同步设置。
+- 修复分析看板全局挂载后的黑屏问题，并兼容 Radix Select 不允许空字符串选项值的约束。
+
+### 终端标签运行状态
+
+- 终端标签状态点升级为统一运行态：支持“运行中 / 待审批 / 已完成 / 异常退出”，并按 `待审批 > 异常退出 > 运行中 > 已完成` 优先级合并 Hook 与 shell 状态。
+- Claude Code 与 Codex CLI 的 `UserPromptSubmit` hook 会将对应标签切换为“运行中”，避免 CLI 刚启动就误显示运行中。
+- 新增 PowerShell / pwsh 通用 shell 运行监控，通过会话级私有 OSC marker 更新命令开始、完成与异常退出状态；设置页可关闭该监控。
+
+### 终端 Shell 设置
+
+- 新增项目弹窗与终端设置的默认 Shell 下拉框新增独立 `Git Bash` 选项，保存值为 `gitbash`，不改变现有 `Bash` 行为。
+- `gitbash` 会从 Git for Windows 常见安装路径、Git PATH 目录与可用的 Windows 注册表信息解析 Git Bash。
+- 找不到 Git Bash 时，应用会报告明确错误，不再回退到缺失的 `bash.exe`。
+
+### Hook 设置增强
+
+- 修复 Claude / Codex Hook 自定义配置目录未持久化的问题，切换设置页后继续保留用户选择的安装位置。
+- Claude / Codex Hook 设置页新增运行中 Hook 安装状态，展示 `UserPromptSubmit` 是否已写入。
+- Codex Hook 安装状态新增 `config.toml` 路径与 `[features].hooks` 检查项，并将其纳入“已安装”判定。
+- Hook 弹框新增全局开关与自动关闭时间配置；关闭弹框后仍保留终端标签状态点更新。
+
+### Codex Hook 通知
+
+- 新增 Codex CLI hook 桥接，复用本地回环通知服务接收 `PermissionRequest` / `Stop` 事件，并按来源区分 `claude` / `codex` 通知来源。
+- 终端标签通知逻辑扩展为兼容 Claude 与 Codex，切换到目标标签后自动清理对应通知。
+- 新增 Codex hook 安装/卸载逻辑，写入 `~/.codex/hooks.json` 与 `~/.codex/config.toml`，并生成 `notify-cli-manager-codex-attention.ps1` / `notify-cli-manager-codex-finished.ps1`。
+
+### Hook 设置调整
+
+- Hook 设置页拆分为 Claude / Codex 两套配置状态与操作，分别展示路径、安装状态和安装/删除入口。
+- Claude Hook 安装逻辑继续只处理 `settings.json` 内的 `Notification` / `Stop` / `StopFailure`，避免覆盖用户自定义 hook。
+- Hook bridge 日志文案统一为 CLI hook，便于区分来源。
+- Hook 设置页 Claude 配置入口按钮改为“选择 Claude 目录”，并将刷新状态按钮移到安装操作之后。
+
+### 终端修复
+
+- 修复 Codex CLI 高频重绘时反复发送光标显示/隐藏 ANSI 序列导致内嵌终端光标快速闪动的问题；前端延迟合并 `CSI ?25h`，并保留 `CSI ?25l` 立即生效。
+- 修复内部终端标签与左侧项目树选中态不同步的问题：切换项目终端标签会同步选中对应项目；选中已有终端的项目时会激活第一个匹配标签。
+- 修复项目行启动按钮双击时事件冒泡到项目行双击处理，导致一次操作额外创建终端的问题；显式启动仍允许同项目多开终端。
+
+### 启动体验修复
+
+- 主窗口启动时默认居中显示，不再出现在屏幕左上角。
+- 启动首帧使用默认深色背景，并在设置加载完成前延迟渲染侧栏与终端布局，避免白屏闪烁和左右区域抖动。
+
+## [V0.1.8] - 2026-05-29
+
+### Claude Hook 标签通知
+
+- 新增 Claude Code Hook 桥接：应用启动本地回环通知服务，为每个 PTY 会话注入 `CLI_MANAGER_TAB_ID`、`CLI_MANAGER_NOTIFY_PORT` 与 `CLI_MANAGER_NOTIFY_TOKEN`，接收 `Notification` / `Stop` / `StopFailure` 事件并映射到对应终端标签。
+- 终端标签状态点从进程状态切换为 Claude 通知状态，支持“需要处理 / 已完成 / 执行异常”三种提示；切换到目标标签后自动清除该标签通知。
+- 右上角新增 Claude Hook 悬浮通知卡片，支持查看目标标签、忽略、关闭单条通知；多条通知按从上到下固定间距排列，不再依赖鼠标悬浮展开。
+
+### Hook 设置
+
+- 设置页新增「Hook 设置」入口，可选择 Claude 配置目录，一键安装或删除 `notify-cli-manager-approval.ps1` 与 `notify-cli-manager-finished.ps1`。
+- 安装逻辑会合并写入 Claude `settings.json` 的 `Notification`、`Stop`、`StopFailure` hook，不删除用户自定义 hook；删除时只清理 CLI-Manager 自己的脚本与命令。
+- Hook 设置页展示 Claude 配置目录、hooks 目录、settings.json 路径与安装状态，并统一 Notification 脚本和 Stop / StopFailure 脚本检测框尺寸。
+
+## [V0.1.6] - 2026-05-27
+
+### WebDAV 同步增强
+
+- WebDAV 云同步支持按设备名称保存独立快照，默认设备名来自系统计算机名，避免多设备项目路径互相覆盖。
+- 设置页新增应用打开/关闭时自动同步动作，可分别配置为关闭、上传或下载；自动同步失败或冲突只提示，不阻塞启动/退出。
+- 手动上传/下载前新增本地与云端摘要对比弹框；从云端恢复支持按项目、分组、命令模板选择覆盖范围。
+- 从云端恢复时若当前设备云端快照为空，会提示“无法从云端同步”并阻止覆盖本地；首次上传仍可创建云端设备快照。
+- 更新 WebDAV 同步契约 spec，明确设备名清洗、远端路径、冲突策略、旧快照兼容与部分覆盖规则。
+
+### 终端修复
+
+- 禁用应用启动时自动恢复历史终端会话，避免旧会话在启动阶段自动重建 PTY；启动流程仍会加载设置、同步配置与项目列表。
+- 修复终端容器异常变窄时向后端同步过小 cols/rows 的问题：前端忽略不可见或低于最小尺寸的 resize，后端对 PTY resize 尺寸增加下限保护。
+
+## [V0.1.5] - 2026-05-26
+
+### 设置与侧栏 UI 优化
+
+- 主界面侧栏底部入口精简：移除主题选择、统计看板、外部终端与精简模式快捷开关，仅保留云同步入口，并在其后提供设置按钮。
+- 设置页信息架构调整：「终端主题」更名为「终端设置」，集中默认 Shell、外部 PowerShell、终端字体、实时预览、终端主题与背景配置；内部 tab id 继续沿用 `terminal-theme`。
+- 「侧栏与行为」移回通用设置，包含精简模式、侧栏密度、关闭按钮行为与调试模式；精简模式置顶展示但移除「推荐」标签。
+- 「主题详情」与「终端实时预览」合并为「终端预览」：窄屏时位于「终端行为」与「终端主题模式」之间，宽屏时保持右侧预览布局。
+- 设置选择卡片去除选中态外圈光晕，保留边框、背景与文字颜色作为基础选中反馈。
+
+### 终端背景图自定义
+
+- 内置终端支持自定义背景图片（JPEG / PNG / GIF），可调整图片不透明度、适配模式（cover / contain / center / tile）、9 宫格位置、高斯模糊与暗化覆盖。
+- 全局生效；终端 Tab 右键菜单新增「隐藏/显示背景图」，临时隐藏不影响全局设置，会话关闭后状态清理。
+- 后端新增 `src-tauri/src/commands/background.rs`：`save_background_image` / `cleanup_unused_backgrounds` / `background_image_exists` 三个 Tauri command。
+- 图片以 SHA-256 内容寻址命名，复制到 `$APPLOCALDATA/backgrounds/<hash>.<ext>`；包含 `validate_relative_path` + canonicalize 双层路径防护，`assetProtocol.scope` 严格锁定到 `$APPLOCALDATA/backgrounds/**`。
+- 设置入口并入「主题」页：新增 `src/components/settings/pages/TerminalBackgroundSection.tsx`，提供开关、图片选择、滑杆、9 宫格定位、缩略图预览与缺失提示。
+- 启动时若背景图文件缺失（设备迁移 / 用户清理）会优雅回退至无背景图状态，并在设置页提示重选。
+- 关联引入 `tauri-plugin-fs`（受 capability 限制于 `fs:default`）与 `tempfile`（仅作为 dev dep）。
+
+### 终端渲染修复
+
+- 修复开启背景图时部分 DOM 文字（输入区 textarea / 链接层 / 装饰层 / 滚动条等）变模糊的问题：`.ui-terminal-bg-layer` 改用 `position: relative + z-index: 0` 建立 stacking context，替代 `isolation: isolate`，避免 GPU 合成层提升导致 DOM 子像素抗锯齿降级为灰阶。
+- 修复带 SGR 高亮的小字号文字在高频背景图（如插画 / 复杂图案）上发糊、颜色异常的问题：`applyTransparency(theme, darkenPct)` 根据用户「暗化」值在 cell 背景注入深色 alpha 地板（系数 0.6），字符边缘 subpixel 像素叠加到稳定深色底而非花花绿绿的图像像素，文字边缘清晰可读，图片仍透出。
+- xterm `allowTransparency` 改为构造期无条件 `true`，配合 hot-update effect 仅切换 `terminal.options.theme`，避免在背景图开关时整体重建 Terminal 导致 scrollback / PTY 连接丢失。
+
+## [V0.1.4] - 2026-05-22
+
+### 终端渲染修复
+
+- 修复内部终端在显示带 ANSI 颜色的 diff 日志（如 `gh run view --log` 输出的 GitHub Actions 日志）时，左侧出现红色竖条 / 背景串色的间歇性渲染异常。
+- 根因为 PTY reader 在 chunk 边界切断了 UTF-8 多字节字符或 ANSI CSI/OSC 转义序列，残字节被 xterm 解读为 SGR 参数从而污染背景色状态。
+- 后端新增 `pty::boundary::safe_emit_boundary` 字节流边界保护：emit 前回退到最近的 UTF-8 字符边界与 ANSI 序列终结点，未完成的残尾延迟到下一轮拼接；覆盖 CSI / OSC / DCS / SOS / PM / APC / 2-byte ESC / ESC + intermediate 各类序列；含 256KB 兜底防止异常源端导致内存增长。
+- 前端 `XTermTerminal` 将模块级共享 `TextDecoder` 改为 per-session 实例 + `{ stream: true }` 流式解码模式，避免跨会话状态污染；`WebglAddon` 注册 `onContextLoss` 回调，GPU 上下文丢失时自动 dispose 并回落 Canvas 渲染。
+- 新增 22 个 Rust 单元测试（含穷举所有切点的 `stress_all_split_points_reconstruct` 与 500 次随机切点的 `stress_random_split_reconstructs_original`）保证字节流契约。
+
+### 性能优化
+
+- `src-tauri/src/commands/history.rs`：历史扫描移出 async runtime，避免阻塞主调度。
+- `src/components/XTermTerminal.tsx`：削减非激活终端的 buffering，降低后台标签内存与渲染开销。
+- `src/components/HistoryWorkspace.tsx` / `src/components/history/historyViewUtils.tsx`：避免历史视图中重复的 lower-case 与搜索工作。
+- `src/components/history/DiffModal.tsx` / `src/lib/diffParser.worker.ts`：减小大 diff payload 体积。
+- `src/stores/settingsStore.ts` / `src/components/settings/pages/GeneralSettingsPage.tsx`：高频 settings 写入做节流，降低 store 持久化压力。
+- `src-tauri/src/sync/mod.rs` / `src-tauri/src/webdav/mod.rs`：收紧 sync / WebDAV 导入路径，减少 CPU 与内存占用。
+
+### 终端主题扩展
+
+- `src/lib/terminalThemes.ts` 新增 5 套终端配色：
+  - Catppuccin Mocha / Macchiato / Latte
+  - Gruvbox Dark / Light
+
+### 工程内务
+
+- 引入 Trellis 工作流脚本与 spec 目录（`.trellis/`），用于本地任务管理与代码规范沉淀。
+- `.gitignore` 收纳 `.agents/` / `.codex/` / `.xcodemap/` 本地工具目录。
+
+## [V0.1.3] - 2026-05-22
+
+### 精简模式与终端输入修复
+
+- 修复精简模式在最大化或全屏状态下切换设置时强制还原窗口的问题。
+- 修复终端中文输入法组合输入期间可能触发滚动跳动的问题。
+
+### 设置入口跳转修复
+
+- 修复侧栏左下角「云同步」入口点击后只能进入设置首页（通用）的问题，现在会直接打开「设置 - 同步」页签。
+- `SettingsModal` 支持 `initialTab` 参数；`Sidebar` / `SidebarFooter` / `SyncStatusIndicator` 的 `onOpenSettings` 升级为 `(tab?: SettingsTab) => void`，云同步入口传入 `"sync"`。
+
+## [V0.1.0] - 2026-05-12
+### 内部终端性能优化
+
+- 优化 PTY 输出渲染：将高频输出合并后限频写入 xterm，降低 Claude Code / Codex 等 Node CLI 的持续 CPU 占用。
+- 非激活终端降频刷新并关闭光标闪烁，减少后台标签页的空闲渲染开销。
+- 移除默认 WebGL 渲染插件，降低长时间交互会话的显存和内存压力。
+- 后端 PTY 读取缓冲从 4KB 提升到 16KB，减少大输出场景下的事件分发次数。
+
+### 更新检测
+
+- 应用启动后自动静默检查 GitHub 最新 Release；发现新版本时弹出提示，可直接前往更新页面。
+
+## [V0.0.9] - 2026-04-21
+### 精简模式启动器
+
+- 新增精简模式：隐藏内嵌终端，并将项目启动行为切换为外部终端启动
+- 将精简模式入口移动到主页面侧栏底部，并统一“外部终端”和“精简模式”的卡片样式
+- 调整精简模式的窗口宽度切换逻辑：开启时收窄到 350，关闭时恢复到进入前宽度
+- 同步更新本地项目说明和忽略规则等当前工作区内的相关改动
+
+## [V0.1.2] - 2026-05-22
+
+### 性能优化与增加主题
+
+- 增加了新的主题。
+- 优化了性能。
+
+## [V0.1.1] - 2026-05-21
+
+### 精简模式启动器
+
+- 优化精简模式启动器与应用生命周期流程。
+- 修复精简模式启动器项目树与主内容区域重叠问题。
+- 统一共享表单控件在面板中的视觉与交互。
+
 ## [V0.0.8] - 2026-04-02
 
 ### 版本号显示与更新检测

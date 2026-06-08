@@ -1,39 +1,71 @@
-﻿import { RefreshCw, Search, Star } from "lucide-react";
-import type { MouseEvent as ReactMouseEvent, RefObject } from "react";
-import type { HistorySearchHit, HistorySessionView, HistorySourceFilter } from "../../lib/types";
-import { SearchHitsPanel } from "./SearchHitsPanel";
+import { Select } from "@/components/ui/select";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { RefreshCw, Search, Star, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import type { HistorySearchHit, HistorySessionView, HistorySourceFilter, Project } from "../../lib/types";
+import { Portal } from "../ui/Portal";
 import { formatTime, makeSessionLabel } from "./historyViewUtils";
+
+const ALL_PROJECTS_SELECT_VALUE = "__all_projects__";
 
 interface SessionGroup {
   label: string;
   items: HistorySessionView[];
 }
 
+type HistoryListRow =
+  | { type: "loading"; id: string }
+  | { type: "searching"; id: string }
+  | { type: "searchHeader"; id: string; count: number }
+  | { type: "searchHit"; id: string; hit: HistorySearchHit }
+  | { type: "group"; id: string; label: string }
+  | { type: "session"; id: string; item: HistorySessionView }
+  | { type: "empty"; id: string }
+  | { type: "loadMore"; id: string };
+
+type SessionContextMenu = {
+  session: HistorySessionView;
+  x: number;
+  y: number;
+};
+
 interface HistoryListPaneProps {
   historySidebarWidth: number;
   sidebarRef: RefObject<HTMLElement | null>;
   sessionListRef: RefObject<HTMLDivElement | null>;
   sourceFilter: HistorySourceFilter;
+  projectPathFilter: string | null;
+  projects: Project[];
   globalQuery: string;
   activeSessionKey: string | null;
   loadingSessions: boolean;
+  loadingMoreSessions: boolean;
   searching: boolean;
   normalizedGlobal: string;
   groupedSessions: SessionGroup[];
   filteredSessionCount: number;
   hasMoreSessions: boolean;
+  loadMoreSessionMode: "local" | "backend";
   visibleSessionCount: number;
   searchHits: HistorySearchHit[];
   globalSearchRef: RefObject<HTMLInputElement | null>;
-  onClose: () => void;
   onRefresh: () => void;
   onSourceFilterChange: (value: HistorySourceFilter) => void;
+  onProjectPathFilterChange: (value: string | null) => void;
   onGlobalQueryChange: (value: string) => void;
   onOpenSession: (sessionKey: string) => void;
+  onDeleteSession: (session: HistorySessionView) => void;
   onOpenHit: (hit: HistorySearchHit) => void;
   onLoadMoreSessions: () => void;
   onSessionListScroll: () => void;
   onStartResize: (e: ReactMouseEvent) => void;
+}
+
+function rowHeight(row: HistoryListRow): number {
+  if (row.type === "group" || row.type === "searchHeader" || row.type === "searching") return 32;
+  if (row.type === "loading" || row.type === "empty" || row.type === "loadMore") return 56;
+  if (row.type === "searchHit") return 72;
+  return 96;
 }
 
 export function HistoryListPane({
@@ -41,41 +73,119 @@ export function HistoryListPane({
   sidebarRef,
   sessionListRef,
   sourceFilter,
+  projectPathFilter,
+  projects,
   globalQuery,
   activeSessionKey,
   loadingSessions,
+  loadingMoreSessions,
   searching,
   normalizedGlobal,
   groupedSessions,
   filteredSessionCount,
   hasMoreSessions,
+  loadMoreSessionMode,
   visibleSessionCount,
   searchHits,
   globalSearchRef,
-  onClose,
   onRefresh,
   onSourceFilterChange,
+  onProjectPathFilterChange,
   onGlobalQueryChange,
   onOpenSession,
+  onDeleteSession,
   onOpenHit,
   onLoadMoreSessions,
   onSessionListScroll,
   onStartResize,
 }: HistoryListPaneProps) {
+  const [contextMenu, setContextMenu] = useState<SessionContextMenu | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const handleSessionContextMenu = useCallback((e: ReactMouseEvent, session: HistorySessionView) => {
+    e.preventDefault();
+    setContextMenu({ session, x: e.clientX, y: e.clientY });
+  }, []);
+
+  const handleContextMenuDelete = useCallback(() => {
+    if (!contextMenu) return;
+    const session = contextMenu.session;
+    setContextMenu(null);
+    onDeleteSession(session);
+  }, [contextMenu, onDeleteSession]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = (e: Event) => {
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target as Node)) return;
+      setContextMenu(null);
+    };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setContextMenu(null);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("scroll", handler, true);
+    window.addEventListener("resize", handler);
+    window.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("scroll", handler, true);
+      window.removeEventListener("resize", handler);
+      window.removeEventListener("keydown", keyHandler);
+    };
+  }, [contextMenu]);
+
+  const rows = useMemo<HistoryListRow[]>(() => {
+    if (loadingSessions) return [{ type: "loading", id: "loading" }];
+
+    const next: HistoryListRow[] = [];
+    if (normalizedGlobal && searching) {
+      next.push({ type: "searching", id: "searching" });
+    }
+    if (normalizedGlobal && searchHits.length > 0) {
+      next.push({ type: "searchHeader", id: "search-header", count: searchHits.length });
+      searchHits.forEach((hit, index) => {
+        next.push({ type: "searchHit", id: `hit:${hit.file_path}:${index}`, hit });
+      });
+    }
+
+    for (const group of groupedSessions) {
+      next.push({ type: "group", id: `group:${group.label}`, label: group.label });
+      for (const item of group.items) {
+        next.push({ type: "session", id: `session:${item.sessionKey}`, item });
+      }
+    }
+
+    if (filteredSessionCount === 0) {
+      next.push({ type: "empty", id: "empty" });
+    }
+    if (hasMoreSessions) {
+      next.push({ type: "loadMore", id: "load-more" });
+    }
+    return next;
+  }, [filteredSessionCount, groupedSessions, hasMoreSessions, loadingSessions, normalizedGlobal, searchHits, searching]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => sessionListRef.current,
+    estimateSize: (index) => rowHeight(rows[index] ?? { type: "loading", id: "fallback" }),
+    overscan: 10,
+    getItemKey: (index) => rows[index]?.id ?? index,
+  });
+
+  const menuX = contextMenu ? Math.max(8, Math.min(contextMenu.x, window.innerWidth - 200)) : 0;
+  const menuY = contextMenu ? Math.max(8, Math.min(contextMenu.y, window.innerHeight - 80)) : 0;
+
   return (
     <aside
       ref={sidebarRef}
-      className="relative flex min-h-0 min-w-[220px] max-w-[70%] flex-col border-r border-border bg-bg-secondary"
+      className="ui-history-sidebar relative flex min-h-0 min-w-[220px] max-w-[70%] flex-col"
       style={{ width: historySidebarWidth }}
     >
-      <div className="border-b border-border p-3">
+      <div className="ui-history-sidebar-top p-3">
         <div className="flex flex-wrap items-center gap-2">
-          <button onClick={onClose} aria-label="关闭历史会话面板" className="ui-btn shrink-0">
-            关闭
-          </button>
-
-          <select
-            className="ui-input shrink-0 px-2 py-1 text-xs"
+          <Select
+            className="h-8 shrink-0 text-[12px]"
             value={sourceFilter}
             onChange={(e) => onSourceFilterChange(e.target.value as HistorySourceFilter)}
             aria-label="历史来源过滤"
@@ -83,12 +193,29 @@ export function HistoryListPane({
             <option value="all">全部来源</option>
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
-          </select>
+          </Select>
+
+          <Select
+            className="h-8 min-w-[120px] shrink-0 text-[12px]"
+            value={projectPathFilter ?? ALL_PROJECTS_SELECT_VALUE}
+            onChange={(e) => {
+              const nextValue = e.target.value;
+              onProjectPathFilterChange(nextValue === ALL_PROJECTS_SELECT_VALUE ? null : nextValue);
+            }}
+            aria-label="历史项目过滤"
+          >
+            <option value={ALL_PROJECTS_SELECT_VALUE}>全部项目</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.path}>
+                {project.name}
+              </option>
+            ))}
+          </Select>
 
           <button
             onClick={onRefresh}
             aria-label="刷新历史会话列表"
-            className="ui-btn shrink-0"
+            className="ui-flat-action ui-toolbar-button ui-toolbar-button-compact shrink-0"
             title="刷新会话列表"
           >
             <RefreshCw size={12} />
@@ -96,7 +223,7 @@ export function HistoryListPane({
           </button>
         </div>
 
-        <div className="ui-input mt-2 flex items-center gap-2 px-2 py-1 text-text-secondary">
+        <div className="ui-history-search-shell mt-2 gap-2 px-2.5 py-1.5 text-text-secondary">
           <Search size={13} />
           <input
             ref={globalSearchRef}
@@ -104,67 +231,132 @@ export function HistoryListPane({
             onChange={(e) => onGlobalQueryChange(e.target.value)}
             aria-label="全局搜索历史会话"
             placeholder="全局搜索（标题/消息/标签）"
-            className="flex-1 bg-transparent text-xs outline-none"
+            className="flex-1 bg-transparent text-[12px] outline-none"
           />
         </div>
 
-        <div className="mt-1 text-[11px] text-text-muted">Ctrl+K 打开全局搜索</div>
+        <div className="mt-1 text-[12px] text-text-muted">Ctrl+K 打开全局搜索</div>
       </div>
 
       <div ref={sessionListRef} onScroll={onSessionListScroll} className="flex-1 overflow-y-auto">
-        {loadingSessions && <div className="px-3 py-4 text-xs text-text-muted">正在加载会话...</div>}
+        <div className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
+          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+            const row = rows[virtualRow.index];
+            if (!row) return null;
+            return (
+              <div
+                key={virtualRow.key}
+                className="absolute left-0 top-0 w-full"
+                style={{
+                  height: virtualRow.size,
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
+              >
+                {row.type === "loading" && <div className="px-3 py-4 text-xs text-text-muted">正在加载会话...</div>}
 
-        {!loadingSessions && normalizedGlobal && searching && (
-          <div className="px-3 py-2 text-[11px] text-text-muted">正在搜索...</div>
-        )}
+                {row.type === "searching" && (
+                  <div className="px-3 py-2 text-[11px] text-text-muted">正在搜索...</div>
+                )}
 
-        {!loadingSessions && normalizedGlobal && (
-          <SearchHitsPanel searchHits={searchHits} onOpenHit={onOpenHit} />
-        )}
+                {row.type === "searchHeader" && (
+                  <div className="px-3 py-2 text-[11px] font-semibold text-text-muted">
+                    搜索命中 {row.count} 条
+                  </div>
+                )}
 
-        {!loadingSessions &&
-          groupedSessions.map((group) => (
-            <div key={group.label}>
-              <div className="ui-dev-label border-y border-border bg-bg-tertiary px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-                {group.label}
+                {row.type === "searchHit" && (
+                  <button
+                    onClick={() => onOpenHit(row.hit)}
+                    className="ui-list-row w-full border-t border-border px-3 py-2 text-left"
+                  >
+                    <div className="truncate text-xs font-semibold text-text-primary">{row.hit.title}</div>
+                    <div className="mt-0.5 truncate text-[11px] text-text-secondary">{row.hit.snippet}</div>
+                    <div className="ui-dev-label mt-1 text-[10px] text-text-muted">
+                      {row.hit.source} · {row.hit.project_key} · {row.hit.role}
+                    </div>
+                  </button>
+                )}
+
+                {row.type === "group" && (
+                  <div className="ui-history-section-label ui-dev-label px-3 py-1.5 text-[11px] font-semibold tracking-[0.04em] text-text-muted">
+                    {row.label}
+                  </div>
+                )}
+
+                {row.type === "session" && (
+                  <div className="px-2 py-1">
+                    <div
+                      onContextMenu={(e) => handleSessionContextMenu(e, row.item)}
+                      className="ui-list-row flex min-h-[88px] w-full items-start gap-2 rounded-xl border border-border/70 bg-surface-container-lowest px-2.5 py-2 text-left"
+                      style={{ backgroundColor: row.item.sessionKey === activeSessionKey ? "var(--bg-tertiary)" : undefined }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => onOpenSession(row.item.sessionKey)}
+                        className="min-w-0 flex-1 overflow-hidden text-left"
+                      >
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          {row.item.starred && <Star size={12} className="shrink-0" style={{ color: "var(--warning)" }} fill="currentColor" />}
+                          <span className="truncate text-[13px] font-semibold text-text-primary">{row.item.displayTitle}</span>
+                        </div>
+                        <div className="ui-dev-label mt-1 truncate text-[11px] text-text-muted">
+                          {row.item.source} · {makeSessionLabel(row.item)} · {row.item.message_count} 条消息
+                        </div>
+                        <div className="ui-dev-label mt-1 truncate text-[11px] text-text-muted">更新于 {formatTime(row.item.updated_at)}</div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteSession(row.item)}
+                        className="ui-flat-action mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-text-muted hover:text-danger"
+                        aria-label={`删除历史会话 ${row.item.displayTitle}`}
+                        title="删除历史会话"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {row.type === "empty" && (
+                  <div className="px-3 py-6 text-center text-xs text-text-muted">未找到匹配会话</div>
+                )}
+
+                {row.type === "loadMore" && (
+                  <div className="p-2">
+                    <button
+                      onClick={onLoadMoreSessions}
+                      className="ui-btn w-full"
+                      aria-label="加载更多历史会话"
+                      disabled={loadingMoreSessions}
+                    >
+                      {loadingMoreSessions
+                        ? "正在加载更多..."
+                        : loadMoreSessionMode === "local"
+                          ? `显示更多匹配会话（${visibleSessionCount}/${filteredSessionCount}）`
+                          : `继续扫描更多历史（已载入 ${filteredSessionCount} 条）`}
+                    </button>
+                  </div>
+                )}
               </div>
-              {group.items.map((item) => (
-                <button
-                  key={item.sessionKey}
-                  onClick={() => onOpenSession(item.sessionKey)}
-                  className="ui-list-row w-full border-b border-border px-3 py-2 text-left"
-                  style={{ backgroundColor: item.sessionKey === activeSessionKey ? "var(--bg-tertiary)" : "transparent" }}
-                >
-                  <div className="flex items-center gap-1.5">
-                    {item.starred && <Star size={12} style={{ color: "var(--warning)" }} fill="currentColor" />}
-                    <span className="truncate text-xs font-semibold text-text-primary">{item.displayTitle}</span>
-                  </div>
-                  <div className="ui-dev-label mt-1 text-[10px] text-text-muted">
-                    {item.source} · {makeSessionLabel(item)} · {item.message_count} 条消息
-                  </div>
-                  <div className="ui-dev-label mt-1 text-[10px] text-text-muted">更新于 {formatTime(item.updated_at)}</div>
-                </button>
-              ))}
-            </div>
-          ))}
+            );
+          })}
+        </div>
+      </div>
 
-        {!loadingSessions && filteredSessionCount === 0 && (
-          <div className="px-3 py-6 text-center text-xs text-text-muted">未找到匹配会话</div>
-        )}
-
-        {!loadingSessions && hasMoreSessions && (
-          <div className="p-2">
-            <button onClick={onLoadMoreSessions} className="ui-btn w-full" aria-label="加载更多历史会话">
-              加载更多 ({visibleSessionCount}/{filteredSessionCount})
+      {contextMenu && (
+        <Portal>
+          <div className="context-menu" style={{ left: menuX, top: menuY }} ref={contextMenuRef} role="menu">
+            <button className="context-menu-item danger" role="menuitem" onClick={handleContextMenuDelete}>
+              删除
             </button>
           </div>
-        )}
-      </div>
+        </Portal>
+      )}
 
       <div
         onMouseDown={onStartResize}
-        className="absolute bottom-0 right-0 top-0 z-10 w-1 cursor-col-resize transition-colors hover:bg-[var(--accent)]"
-        style={{ opacity: 0.35 }}
+        className="ui-history-resize-handle absolute bottom-0 right-0 top-0 z-10 w-1.5 cursor-col-resize transition-colors"
+        style={{ opacity: 0.6 }}
       />
     </aside>
   );

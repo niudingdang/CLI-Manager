@@ -1,19 +1,27 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast, Toaster } from "sonner";
+import { isTauri } from "@tauri-apps/api/core";
+import { LogicalSize } from "@tauri-apps/api/dpi";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Sidebar } from "./components/sidebar";
 import { TerminalTabs } from "./components/TerminalTabs";
 import { CommandPalette } from "./components/CommandPalette";
+import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { StatsPanel } from "./components/stats/StatsPanel";
 import { WindowTitleBar } from "./components/WindowTitleBar";
+import { CloseConfirmDialog } from "./components/CloseConfirmDialog";
+import { AlertTriangle, Check, X } from "./components/icons";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useProjectStore } from "./stores/projectStore";
 import { useSessionStore } from "./stores/sessionStore";
-import { useTerminalStore } from "./stores/terminalStore";
 import { useSyncStore } from "./stores/syncStore";
-import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useHistoryStore } from "./stores/historyStore";
-import { createPerfMarker } from "./lib/logger";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useUpdateStore } from "./stores/updateStore";
+import { useTerminalStore, type CliHookPayload } from "./stores/terminalStore";
+import { createPerfMarker, logWarn } from "./lib/logger";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 const appStartAt =
@@ -21,38 +29,268 @@ const appStartAt =
     ? performance.now()
     : Date.now();
 let firstScreenPerfReported = false;
+let startupBaseReady = false;
+let deferredStartupTasksStarted = false;
+let startupUpdateChecked = false;
+const COMPACT_WINDOW_WIDTH = 350;
+const WINDOW_MIN_HEIGHT = 600;
+const IN_TAURI = isTauri();
+const CLAUDE_HOOK_TOAST_PREFIX = "claude-hook-notification";
+let claudeHookToastSequence = 0;
+
+type ClaudeHookToastVariant = "attention" | "approval" | "finished" | "failed";
+
+interface ClaudeHookToastStyle {
+  variant: ClaudeHookToastVariant;
+  icon: typeof AlertTriangle;
+  eyebrow: string;
+  actionLabel: string;
+}
+
+interface ClaudeHookToastItem {
+  id: string;
+  title: string;
+  message?: string;
+  tabTitle: string;
+  style: ClaudeHookToastStyle;
+}
+
+function createClaudeHookToastId(tabId: string): string {
+  claudeHookToastSequence += 1;
+  return `${CLAUDE_HOOK_TOAST_PREFIX}-${tabId}-${claudeHookToastSequence}`;
+}
+
+function getClaudeHookToastStyle(payload: CliHookPayload): ClaudeHookToastStyle {
+  if (payload.event === "Stop") {
+    return { variant: "finished", icon: Check, eyebrow: "任务完成", actionLabel: "查看" };
+  }
+  if (payload.event === "StopFailure") {
+    return { variant: "failed", icon: AlertTriangle, eyebrow: "执行失败", actionLabel: "查看" };
+  }
+  if (payload.event === "PermissionRequest") {
+    return { variant: "approval", icon: AlertTriangle, eyebrow: "需要审批", actionLabel: "去处理" };
+  }
+  return { variant: "attention", icon: AlertTriangle, eyebrow: "提醒", actionLabel: "查看" };
+}
+
+function getCliHookSourceName(payload: CliHookPayload): string {
+  return payload.source === "codex" ? "Codex CLI" : "Claude Code";
+}
+
+function getClaudeHookToastTitle(payload: CliHookPayload, tabTitle: string): string {
+  if (payload.title) return payload.title;
+  const sourceName = getCliHookSourceName(payload);
+  if (payload.event === "Stop") return `${tabTitle} 已完成`;
+  if (payload.event === "StopFailure") return `${tabTitle} 执行失败`;
+  if (payload.event === "PermissionRequest") return `${sourceName} 需要审批`;
+  return `${sourceName} 提醒`;
+}
+
+function showClaudeHookToast(payload: CliHookPayload, tabId: string): void {
+  const settings = useSettingsStore.getState();
+  if (!settings.hookPopupNotificationsEnabled) return;
+
+  const terminalStore = useTerminalStore.getState();
+  const tabTitle = terminalStore.sessions.find((session) => session.id === tabId)?.title ?? getCliHookSourceName(payload);
+  const item: ClaudeHookToastItem = {
+    id: createClaudeHookToastId(tabId),
+    title: getClaudeHookToastTitle(payload, tabTitle),
+    message: payload.message ?? undefined,
+    tabTitle,
+    style: getClaudeHookToastStyle(payload),
+  };
+  const Icon = item.style.icon;
+
+  toast.custom(
+    () => (
+      <div className="claude-hook-toast" data-variant={item.style.variant} data-tab-id={tabId}>
+        <div className="claude-hook-toast__icon" aria-hidden="true">
+          <Icon size={16} strokeWidth={2.4} />
+        </div>
+        <div className="claude-hook-toast__content">
+          <div className="claude-hook-toast__eyebrow">{item.style.eyebrow}</div>
+          <div className="claude-hook-toast__title">{item.title}</div>
+          <div className="claude-hook-toast__source" title={item.tabTitle}>
+            来自：{item.tabTitle}
+          </div>
+          {item.message ? <div className="claude-hook-toast__description">{item.message}</div> : null}
+          <div className="claude-hook-toast__actions">
+            <button
+              type="button"
+              className="claude-hook-toast__action"
+              onClick={() => {
+                useHistoryStore.getState().closeHistory();
+                useTerminalStore.getState().setActive(tabId);
+                toast.dismiss(item.id);
+              }}
+            >
+              {item.style.actionLabel}
+            </button>
+            <button type="button" className="claude-hook-toast__ignore" onClick={() => toast.dismiss(item.id)}>
+              忽略
+            </button>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="claude-hook-toast__close"
+          aria-label="关闭通知"
+          onClick={() => toast.dismiss(item.id)}
+        >
+          <X size={20} strokeWidth={2.2} />
+        </button>
+      </div>
+    ),
+    {
+      id: item.id,
+      duration: settings.hookPopupAutoCloseEnabled ? settings.hookPopupAutoCloseSeconds * 1000 : Infinity,
+      position: "top-right",
+    }
+  );
+}
+
+function runDeferredStartupTasks(): void {
+  if (!startupBaseReady || !firstScreenPerfReported || deferredStartupTasksStarted) return;
+  deferredStartupTasksStarted = true;
+
+  window.setTimeout(() => {
+    void (async () => {
+      const result = await useSyncStore.getState().runAutoSync("startup");
+      if (result === "conflict") {
+        toast.warning("自动同步暂停", { description: "检测到云端与本地都有更新，请进入同步设置手动处理。" });
+      } else if (result === "error") {
+        toast.error("启动自动同步失败", { description: "请检查 WebDAV 配置或网络连接。" });
+      }
+    })();
+
+    if (!startupUpdateChecked) {
+      startupUpdateChecked = true;
+      void (async () => {
+        const updateStore = useUpdateStore.getState();
+        await updateStore.fetchVersion();
+        const updateInfo = await updateStore.checkUpdate({ silent: true });
+        if (!updateInfo) return;
+        toast.info(`发现新版本 V${updateInfo.version}`, {
+          description: "点击前往 Release 页面下载更新",
+          action: updateInfo.downloadUrl
+            ? {
+                label: "前往更新",
+                onClick: () => {
+                  void openUrl(updateInfo.downloadUrl);
+                },
+              }
+            : undefined,
+          duration: 12000,
+        });
+      })();
+    }
+  }, 0);
+}
 
 function App() {
   const loadSettings = useSettingsStore((s) => s.load);
+  const settingsLoaded = useSettingsStore((s) => s.loaded);
   const resolvedTheme = useSettingsStore((s) => s.resolvedTheme);
   const lightThemePalette = useSettingsStore((s) => s.lightThemePalette);
   const darkThemePalette = useSettingsStore((s) => s.darkThemePalette);
+  const uiFontFamily = useSettingsStore((s) => s.uiFontFamily);
+  const uiTextColor = useSettingsStore((s) => s.uiTextColor);
+  const viewMode = useSettingsStore((s) => s.viewMode);
+  const closeBehavior = useSettingsStore((s) => s.closeBehavior);
+  const updateSetting = useSettingsStore((s) => s.update);
   const historySessions = useHistoryStore((s) => s.sessions);
-  const loadHistorySessions = useHistoryStore((s) => s.loadSessions);
-  const openHistoryWorkspace = useHistoryStore((s) => s.openHistory);
+  const openHistory = useHistoryStore((s) => s.openHistory);
   const openHistorySession = useHistoryStore((s) => s.openSession);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>("general");
   const [statsOpen, setStatsOpen] = useState(false);
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [terminalFullscreen, setTerminalFullscreen] = useState(false);
+  const restoreWindowWidthRef = useRef<number | null>(null);
+  const closeBehaviorRef = useRef(closeBehavior);
 
-  useKeyboardShortcuts();
+  useEffect(() => {
+    closeBehaviorRef.current = closeBehavior;
+  }, [closeBehavior]);
+
+  const runCloseAutoSync = useCallback(async () => {
+    const result = await useSyncStore.getState().runAutoSync("close");
+    if (result === "conflict") {
+      toast.warning("退出自动同步暂停", { description: "检测到云端与本地都有更新，请进入同步设置手动处理。" });
+    } else if (result === "error") {
+      toast.error("退出自动同步失败", { description: "请检查 WebDAV 配置或网络连接。" });
+    }
+  }, []);
+
+  const handleOpenStats = useCallback(() => {
+    setStatsOpen(true);
+    const history = useHistoryStore.getState();
+    if (history.sessions.length === 0) {
+      void history.loadSessions().catch((err) => {
+        toast.error("加载历史会话失败", { description: String(err) });
+      });
+    }
+  }, []);
+
+  const handleOpenStatsSession = useCallback(
+    async (sessionKey: string) => {
+      await openHistory();
+      await openHistorySession(sessionKey);
+    },
+    [openHistory, openHistorySession]
+  );
+
+  const handleToggleTerminalFullscreen = useCallback(() => {
+    const nextFullscreen = !terminalFullscreen;
+    if (!IN_TAURI) {
+      setTerminalFullscreen(nextFullscreen);
+      return;
+    }
+
+    void (async () => {
+      try {
+        await getCurrentWindow().setFullscreen(nextFullscreen);
+        setTerminalFullscreen(nextFullscreen);
+      } catch (err) {
+        toast.error(nextFullscreen ? "进入全屏失败" : "退出全屏失败", { description: String(err) });
+        logWarn("Failed to toggle terminal fullscreen", err);
+      }
+    })();
+  }, [terminalFullscreen]);
+
+  useKeyboardShortcuts({ onToggleTerminalFullscreen: handleToggleTerminalFullscreen });
+
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    const unlistenPromise = listen<CliHookPayload>("claude-hook-notification", (event) => {
+      const tabId = useTerminalStore.getState().handleCliHookEvent(event.payload);
+      if (tabId && event.payload.event !== "UserPromptSubmit") {
+        showClaudeHookToast(event.payload, tabId);
+      }
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     const init = async () => {
-      // 1. 加载设置
-      await loadSettings();
+      // 1. 并行加载相互独立的子系统：设置、同步配置、会话持久化
+      await Promise.all([
+        loadSettings(),
+        useSyncStore.getState().load(),
+        useSessionStore.getState().load(),
+      ]);
 
-      // 2. 加载同步配置
-      await useSyncStore.getState().load();
-
-      // 3. 加载会话持久化数据
-      await useSessionStore.getState().load();
-
-      // 4. 加载项目列表
+      // 2. 加载项目列表
       await useProjectStore.getState().fetchAll();
 
-      // 5. 恢复终端会话
-      const { projects, projectHealth } = useProjectStore.getState();
-      const projectMap = new Map(projects.map((p) => [p.id, p]));
-      await useTerminalStore.getState().restoreSessions(projectMap, projectHealth);
+      // 3. 启动时不恢复历史终端，避免重建 PTY 并重跑 startupCmd。
+      await useSessionStore.getState().clear();
+
+      startupBaseReady = true;
+      runDeferredStartupTasks();
     };
     init().catch((err) => {
       toast.error("初始化失败", { description: String(err) });
@@ -65,50 +303,204 @@ function App() {
     document.documentElement.setAttribute("data-dark-palette", darkThemePalette);
   }, [resolvedTheme, lightThemePalette, darkThemePalette]);
 
-  // 应用关闭时清除会话持久化数据（不恢复主动关闭时的终端）
   useEffect(() => {
+    const root = document.documentElement.style;
+    if (uiTextColor) {
+      root.setProperty("--text-primary", uiTextColor);
+      root.setProperty(
+        "--text-secondary",
+        `color-mix(in srgb, ${uiTextColor} 85%, var(--bg-primary))`
+      );
+      root.setProperty(
+        "--text-muted",
+        `color-mix(in srgb, ${uiTextColor} 60%, var(--bg-primary))`
+      );
+    } else {
+      root.removeProperty("--text-primary");
+      root.removeProperty("--text-secondary");
+      root.removeProperty("--text-muted");
+    }
+  }, [uiTextColor]);
+
+  useEffect(() => {
+    if (uiFontFamily) {
+      document.documentElement.style.setProperty("--font-ui-sans", uiFontFamily);
+      document.documentElement.style.setProperty("--font-ui-mono", uiFontFamily);
+      document.documentElement.style.fontFamily = uiFontFamily;
+    } else {
+      document.documentElement.style.removeProperty("--font-ui-sans");
+      document.documentElement.style.removeProperty("--font-ui-mono");
+      document.documentElement.style.fontFamily = "";
+    }
+
+    const styleId = "ui-font-family-override";
+    let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.id = styleId;
+      document.head.appendChild(styleEl);
+    }
+    if (uiFontFamily) {
+      styleEl.textContent = `
+        html, body, #root, button, input, select, textarea, optgroup,
+        [class*="font-sans"], [class*="font-mono"], code, pre, kbd, samp,
+        .ui-mono, .ui-dev-label {
+          font-family: ${uiFontFamily} !important;
+        }
+        .xterm, .xterm *, .xterm-helper-textarea {
+          font-family: revert !important;
+        }
+      `;
+    } else {
+      styleEl.textContent = "";
+    }
+  }, [uiFontFamily]);
+
+  // 跟随系统主题：监听放在 effect 中，确保挂载/卸载严格成对，避免 store.load 中残留 listener
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => useSettingsStore.getState().syncSystemTheme();
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    const unlistenPromise = listen("tray-quit-requested", async () => {
+      try {
+        await runCloseAutoSync();
+        await useSessionStore.getState().clear();
+      } finally {
+        try {
+          await getCurrentWindow().destroy();
+        } catch (err) {
+          logWarn("Failed to destroy window from tray quit", err);
+        }
+      }
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [runCloseAutoSync]);
+
+  // 关闭窗口拦截：根据 closeBehavior 决定最小化到托盘 / 直接退出 / 弹窗询问
+  useEffect(() => {
+    if (!IN_TAURI) return;
     const appWindow = getCurrentWindow();
     let unlistenPromise: Promise<() => void> | null = null;
 
-    unlistenPromise = appWindow.onCloseRequested(async () => {
-      await useSessionStore.getState().clear();
+    unlistenPromise = appWindow.onCloseRequested(async (event) => {
+      const behavior = closeBehaviorRef.current;
+      if (behavior === "minimize") {
+        event.preventDefault();
+        try {
+          await appWindow.hide();
+        } catch (err) {
+          logWarn("Failed to hide window on close", err);
+        }
+        return;
+      }
+      if (behavior === "exit") {
+        event.preventDefault();
+        try {
+          await runCloseAutoSync();
+          await useSessionStore.getState().clear();
+        } finally {
+          try {
+            await appWindow.destroy();
+          } catch (err) {
+            logWarn("Failed to destroy window on close", err);
+          }
+        }
+        return;
+      }
+      event.preventDefault();
+      setCloseDialogOpen(true);
     });
 
     return () => {
       unlistenPromise?.then((fn) => fn()).catch(() => {});
     };
-  }, []);
+  }, [runCloseAutoSync]);
 
-  const handleOpenStats = useCallback(() => {
-    const stopPerf = createPerfMarker("stats.open", {
-      sessionsBefore: historySessions.length,
-    });
+  const handleCloseDialogMinimize = useCallback(
+    (remember: boolean) => {
+      setCloseDialogOpen(false);
+      if (remember) {
+        void updateSetting("closeBehavior", "minimize");
+      }
+      void (async () => {
+        try {
+          await getCurrentWindow().hide();
+        } catch (err) {
+          logWarn("Failed to hide window from dialog", err);
+        }
+      })();
+    },
+    [updateSetting]
+  );
+
+  const handleCloseDialogExit = useCallback(
+    (remember: boolean) => {
+      setCloseDialogOpen(false);
+      if (remember) {
+        void updateSetting("closeBehavior", "exit");
+      }
+      void (async () => {
+        try {
+          await runCloseAutoSync();
+          await useSessionStore.getState().clear();
+        } finally {
+          try {
+            await getCurrentWindow().destroy();
+          } catch (err) {
+            logWarn("Failed to destroy window from dialog", err);
+          }
+        }
+      })();
+    },
+    [runCloseAutoSync, updateSetting]
+  );
+
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    const appWindow = getCurrentWindow();
     void (async () => {
       try {
-        if (historySessions.length === 0) {
-          await loadHistorySessions();
+        const shouldPreserveWindowBounds =
+          (await appWindow.isMaximized()) || (await appWindow.isFullscreen());
+        if (shouldPreserveWindowBounds) return;
+        if (viewMode !== "compact") {
+          if (restoreWindowWidthRef.current && restoreWindowWidthRef.current > COMPACT_WINDOW_WIDTH) {
+            await appWindow.setSize(
+              new LogicalSize(restoreWindowWidthRef.current, Math.max(window.innerHeight, WINDOW_MIN_HEIGHT))
+            );
+          }
+          await appWindow.setMinSize(new LogicalSize(800, WINDOW_MIN_HEIGHT));
+          restoreWindowWidthRef.current = null;
+          return;
         }
-        setStatsOpen(true);
-        stopPerf({ sessionsAfter: useHistoryStore.getState().sessions.length });
+        if (restoreWindowWidthRef.current == null) {
+          restoreWindowWidthRef.current = window.innerWidth;
+        }
+        if (settingsOpen) {
+          await appWindow.setMinSize(new LogicalSize(800, WINDOW_MIN_HEIGHT));
+          const targetWidth = Math.max(restoreWindowWidthRef.current ?? 800, 800);
+          await appWindow.setSize(
+            new LogicalSize(targetWidth, Math.max(window.innerHeight, WINDOW_MIN_HEIGHT))
+          );
+          return;
+        }
+        await appWindow.setMinSize(new LogicalSize(COMPACT_WINDOW_WIDTH, WINDOW_MIN_HEIGHT));
+        await appWindow.setSize(
+          new LogicalSize(COMPACT_WINDOW_WIDTH, Math.max(window.innerHeight, WINDOW_MIN_HEIGHT))
+        );
       } catch (err) {
-        stopPerf({ error: String(err) });
-        toast.error("加载历史会话失败", { description: String(err) });
+        logWarn("Failed to adjust window size", err);
       }
     })();
-  }, [historySessions.length, loadHistorySessions]);
-
-  const handleOpenSessionFromStats = useCallback(
-    async (sessionKey: string) => {
-      try {
-        await openHistoryWorkspace();
-        await openHistorySession(sessionKey);
-      } catch (err) {
-        toast.error("跳转历史会话失败", { description: String(err) });
-        throw err;
-      }
-    },
-    [openHistoryWorkspace, openHistorySession]
-  );
+  }, [viewMode, settingsOpen]);
 
   useEffect(() => {
     if (firstScreenPerfReported) return;
@@ -126,38 +518,72 @@ function App() {
         firstScreenPerfReported = true;
         stopPerf({
           resolvedTheme,
-          statsPrefetched: historySessions.length > 0,
+          viewMode,
         });
+        runDeferredStartupTasks();
       });
     });
     return () => {
       window.cancelAnimationFrame(raf1);
       window.cancelAnimationFrame(raf2);
     };
-  }, [resolvedTheme, historySessions.length]);
+  }, [resolvedTheme, viewMode]);
+
+  if (!settingsLoaded) {
+    return <div className="ui-workspace-shell flex h-screen flex-col" />;
+  }
 
   return (
     <div className="ui-workspace-shell flex h-screen flex-col">
       <a href="#main-content" className="skip-link">
         跳转到主内容
       </a>
-      <WindowTitleBar />
-      <div className="flex min-h-0 flex-1">
-        <Sidebar onOpenStats={handleOpenStats} />
-        <main id="main-content" className="ui-main-shell flex min-w-0 flex-1 flex-col" tabIndex={-1}>
-          <TerminalTabs />
-        </main>
-      </div>
+      {(!terminalFullscreen || viewMode === "compact") && <WindowTitleBar />}
+      {viewMode === "compact" ? (
+        <div id="main-content" className="flex min-h-0 flex-1" tabIndex={-1}>
+          <Sidebar
+            onOpenSettings={(tab) => {
+              setSettingsInitialTab(tab ?? "general");
+              setSettingsOpen(true);
+            }}
+            onOpenStats={handleOpenStats}
+            compactMode
+          />
+        </div>
+      ) : (
+        <div className="flex min-h-0 flex-1">
+          {!terminalFullscreen && (
+            <Sidebar
+              onOpenSettings={(tab) => {
+                setSettingsInitialTab(tab ?? "general");
+                setSettingsOpen(true);
+              }}
+              onOpenStats={handleOpenStats}
+            />
+          )}
+          <main id="main-content" className="ui-main-shell flex min-w-0 flex-1 flex-col" tabIndex={-1}>
+            <TerminalTabs fullscreen={terminalFullscreen} onToggleFullscreen={handleToggleTerminalFullscreen} />
+          </main>
+        </div>
+      )}
       <CommandPalette />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} initialTab={settingsInitialTab} />
       <StatsPanel
         open={statsOpen}
         sessions={historySessions}
         onClose={() => setStatsOpen(false)}
-        onOpenSession={handleOpenSessionFromStats}
+        onOpenSession={handleOpenStatsSession}
+      />
+      <CloseConfirmDialog
+        open={closeDialogOpen}
+        onMinimize={handleCloseDialogMinimize}
+        onExit={handleCloseDialogExit}
+        onClose={() => setCloseDialogOpen(false)}
       />
       <Toaster
         theme={resolvedTheme}
         position="bottom-right"
+        expand
         toastOptions={{
           classNames: {
             toast: "border border-border bg-bg-secondary text-text-primary",
