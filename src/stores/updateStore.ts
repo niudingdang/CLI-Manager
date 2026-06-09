@@ -51,10 +51,32 @@ function trimReleaseNotes(notes: string | undefined): string {
     : notes;
 }
 
-function formatUpdateError(error: unknown, fallback: string): string {
+const UPDATE_MANIFEST_UNAVAILABLE_MESSAGE =
+  "当前 Release 还没有自动更新清单，请在下一次发布后再试，或先查看 Release 页面手动安装。";
+const UPDATE_GENERIC_ERROR_SUFFIX = "请稍后重试，或查看 Release 页面手动安装。";
+
+function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string" && error.trim()) return error;
-  return fallback;
+  if (typeof error === "string") return error.trim();
+  return "";
+}
+
+function isUpdaterManifestError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("valid release json") ||
+    normalized.includes("release json") ||
+    normalized.includes("manifest") ||
+    (normalized.includes("could not fetch") && normalized.includes("release"))
+  );
+}
+
+function formatUpdateError(error: unknown, fallback: string): string {
+  const message = getErrorMessage(error);
+  if (message && isUpdaterManifestError(message)) {
+    return UPDATE_MANIFEST_UNAVAILABLE_MESSAGE;
+  }
+  return `${fallback}，${UPDATE_GENERIC_ERROR_SUFFIX}`;
 }
 
 function toUpdateInfo(update: Update): UpdateInfo {
