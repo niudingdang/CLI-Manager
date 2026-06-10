@@ -1,5 +1,25 @@
 # Changelog
 
+## [V1.0.1] - 2026-06-10
+
+### Windows 后台进程闪窗修复
+
+- 修复打开 / 刷新 ccusage 统计面板时连续弹出多个 CMD 窗口一闪而过的问题：Rust 端静默执行 bun / bunx / npm 时未设置 `CREATE_NO_WINDOW`，GUI 进程每次 spawn 都会创建控制台窗口。
+- 修复新建 Git Bash 终端时偶发闪窗：Git Bash 路径解析 fallback 到注册表查询（`reg query`）同样改为静默执行。
+- 新增 `silent_command` helper（`shell_resolver.rs`），后续所有静默子进程统一复用；外部终端 `wt.exe` 的弹窗行为不受影响。
+
+### 设置与侧栏体验
+
+- 修复终端设置「终端预览」宽屏下仍不吸顶的问题：根因是项目引入的 Mantine 无 cascade layer 样式（Card 自带 `position: relative`）必然覆盖 Tailwind `@layer utilities` 中的 `sticky`；将 sticky / grid 定位移至普通 wrapper div，仅 ≥xl 双列布局吸顶，窄屏单列保持文档流。
+- 项目右键菜单新增「打开所在目录」：通过 `plugin-opener` 的 `openPath` 在资源管理器中打开项目路径；capability 新增带 scope 的 `opener:allow-open-path`；路径无效时 toast 报错不崩溃。
+- 应用字体颜色控件打磨：hex 输入框改为固定紧凑宽度；原常驻的「跟随主题」禁用态按钮改为仅自定义颜色生效时显示的「恢复跟随主题」动作按钮。
+
+### 应用字体颜色生效修复
+
+- 修复自定义应用字体颜色多次设置只偶尔生效的问题：取色器改为 `onChange` 实时提交，在系统取色对话框内拖动即实时生效，不再依赖失焦提交。
+- 对比度门槛从 WCAG 4.5 降为 1.6（仅拦截与背景几乎同色的自锁风险），并消除静默丢弃：低于 1.6 显示「颜色与背景过于接近，未应用」，1.6~4.5 显示「对比度较低，可能影响可读性」（颜色仍生效）。
+- 十六进制解析与对比度计算抽取为 `src/lib/contrast.ts` 共享工具；设置页反馈改用 palette → 背景色纯映射计算，修复切换主题 / 配色瞬间按旧背景判定的时序问题。
+
 ## [V1.0.0] - 2026-06-10
 
 ### 首个正式版本
