@@ -7,6 +7,8 @@ import { Select } from "@/components/ui/select";
 import type {
   HistorySessionSummary,
   HistoryStatsDailySeriesItem,
+  HistoryStatsHeatmapDay,
+  HistoryStatsHourlyActivityItem,
   HistoryStatsModelItem,
   HistoryStatsPayload,
   HistoryStatsProjectItem,
@@ -31,6 +33,7 @@ const DATE_INPUT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MONTH_INPUT_PATTERN = /^(\d{4})-(\d{2})$/;
 const WEEK_INPUT_PATTERN = /^(\d{4})-W(\d{2})$/;
 const YEAR_INPUT_PATTERN = /^(\d{4})$/;
+const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 interface DateRangeInput {
@@ -39,6 +42,7 @@ interface DateRangeInput {
 }
 
 type StatsTimeWindowMode = "day" | "week" | "month" | "year" | "custom";
+type StatsBucketGranularity = "day" | "hour";
 
 interface StatsTimeWindowState {
   mode: StatsTimeWindowMode;
@@ -97,6 +101,16 @@ const DATETIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
 function formatDay(dayStartUtc: number): string {
   if (!Number.isFinite(dayStartUtc) || dayStartUtc <= 0) return "-";
   return DAY_FORMATTER.format(new Date(dayStartUtc));
+}
+
+function formatHour(hourStartUtc: number): string {
+  if (!Number.isFinite(hourStartUtc) || hourStartUtc <= 0) return "-";
+  const date = new Date(hourStartUtc);
+  return `${String(date.getHours()).padStart(2, "0")}:00`;
+}
+
+function formatBucketLabel(bucketStartUtc: number, granularity: StatsBucketGranularity): string {
+  return granularity === "hour" ? formatHour(bucketStartUtc) : formatDay(bucketStartUtc);
 }
 
 function formatDateTime(ts: number | null): string {
@@ -259,6 +273,45 @@ function axisDayLabel(dayStartUtc: number): string {
   if (!Number.isFinite(dayStartUtc) || dayStartUtc <= 0) return "-";
   const date = new Date(dayStartUtc);
   return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function axisHourLabel(hourStartUtc: number): string {
+  if (!Number.isFinite(hourStartUtc) || hourStartUtc <= 0) return "-";
+  return String(new Date(hourStartUtc).getHours()).padStart(2, "0");
+}
+
+function axisBucketLabel(bucketStartUtc: number, granularity: StatsBucketGranularity): string {
+  return granularity === "hour" ? axisHourLabel(bucketStartUtc) : axisDayLabel(bucketStartUtc);
+}
+
+function hourlyBucketStart(item: HistoryStatsHourlyActivityItem, dayStartAt: number | null): number {
+  if (Number.isFinite(item.hour_start_utc) && item.hour_start_utc > 0) return item.hour_start_utc;
+  if (dayStartAt !== null && Number.isFinite(dayStartAt)) return dayStartAt + item.hour * HOUR_MS;
+  return 0;
+}
+
+function hourlyToTrendItem(item: HistoryStatsHourlyActivityItem, dayStartAt: number | null): HistoryStatsDailySeriesItem {
+  return {
+    day_start_utc: hourlyBucketStart(item, dayStartAt),
+    sessions: item.sessions,
+    messages: item.messages,
+    input_tokens: item.input_tokens,
+    output_tokens: item.output_tokens,
+    cache_read_tokens: item.cache_read_tokens,
+    cache_creation_tokens: item.cache_creation_tokens,
+    total_cost_usd: item.total_cost_usd,
+    unpriced_tokens: item.unpriced_tokens,
+  };
+}
+
+function hourlyToHeatmapDay(item: HistoryStatsHourlyActivityItem, dayStartAt: number | null): HistoryStatsHeatmapDay {
+  return {
+    day_start_utc: hourlyBucketStart(item, dayStartAt),
+    sessions: item.sessions,
+    messages: item.messages,
+    level: item.level,
+    session_refs: item.session_refs,
+  };
 }
 
 function tooltipRows(value: unknown): Record<string, unknown>[] {
@@ -429,7 +482,13 @@ function ContextNote({
   );
 }
 
-function DailyUsageTrendChart({ items }: { items: HistoryStatsDailySeriesItem[] }) {
+function DailyUsageTrendChart({
+  items,
+  granularity,
+}: {
+  items: HistoryStatsDailySeriesItem[];
+  granularity: StatsBucketGranularity;
+}) {
   const peak = useMemo(() => {
     const found = items.reduce<HistoryStatsDailySeriesItem | null>((current, item) => {
       if (!current) return item;
@@ -458,6 +517,7 @@ function DailyUsageTrendChart({ items }: { items: HistoryStatsDailySeriesItem[] 
           const rows = tooltipRows(params);
           const day = items[tooltipIndex(rows[0])];
           if (!day) return "";
+          const bucketLabel = formatBucketLabel(day.day_start_utc, granularity);
           const lineRows = rows
             .map((row) => {
               const name = typeof row.seriesName === "string" ? row.seriesName : "";
@@ -467,7 +527,7 @@ function DailyUsageTrendChart({ items }: { items: HistoryStatsDailySeriesItem[] 
               return `<div style="display:flex;align-items:center;justify-content:space-between;gap:18px;line-height:22px;"><span>${marker}${name}</span><strong>${display}</strong></div>`;
             })
             .join("");
-          return `<div style="min-width:210px;"><strong>${formatDay(day.day_start_utc)}</strong>${lineRows}<div style="margin-top:6px;color:#CBD5E1;">Cache：${formatCount(day.cache_creation_tokens + day.cache_read_tokens)} · 未定价：${formatCount(day.unpriced_tokens)}</div></div>`;
+          return `<div style="min-width:210px;"><strong>${bucketLabel}</strong>${lineRows}<div style="margin-top:6px;color:#CBD5E1;">Cache：${formatCount(day.cache_creation_tokens + day.cache_read_tokens)} · 未定价：${formatCount(day.unpriced_tokens)}</div></div>`;
         },
       },
       legend: {
@@ -481,7 +541,7 @@ function DailyUsageTrendChart({ items }: { items: HistoryStatsDailySeriesItem[] 
       xAxis: {
         type: "category",
         boundaryGap: false,
-        data: items.map((item) => axisDayLabel(item.day_start_utc)),
+        data: items.map((item) => axisBucketLabel(item.day_start_utc, granularity)),
         axisLine: { lineStyle: { color: "var(--border)" } },
         axisTick: { show: false },
         axisLabel: {
@@ -536,17 +596,19 @@ function DailyUsageTrendChart({ items }: { items: HistoryStatsDailySeriesItem[] 
         },
       ],
     };
-  }, [items, peak]);
+  }, [items, peak, granularity]);
 
   return (
     <section className="rounded-2xl bg-bg-secondary p-4 lg:p-5">
       <div className="mb-3 flex flex-wrap items-start gap-3">
         <div>
           <div className="text-[15px] font-semibold text-text-primary">Token / 费用趋势</div>
-          <div className="mt-1 text-[11px] text-text-muted">折线展示 Token 主趋势，费用以弱柱状辅助对照。</div>
+          <div className="mt-1 text-[11px] text-text-muted">
+            {granularity === "hour" ? "按 24 小时展示 Token 主趋势，费用以弱柱状辅助对照。" : "折线展示 Token 主趋势，费用以弱柱状辅助对照。"}
+          </div>
         </div>
         <div className="ml-auto rounded-full bg-bg-primary px-3 py-1 text-[11px] font-medium text-text-secondary">
-          {peak ? `最高：${formatDay(peak.day_start_utc)} · ${formatCount(totalTokensOf(peak))} Token` : "暂无峰值"}
+          {peak ? `最高：${formatBucketLabel(peak.day_start_utc, granularity)} · ${formatCount(totalTokensOf(peak))} Token` : "暂无峰值"}
         </div>
       </div>
       {hasData ? <EChart option={option} className="h-[380px] w-full" /> : <EmptyBlock text="当前时间窗口没有可绘制的 Token / 费用数据。" />}
@@ -816,25 +878,54 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
   }, [open, projectSelectionReady, projectKey, sourceFilter, dateBounds, statsQueryKey, loadStats]);
 
   useEffect(() => {
-    if (!stats || selectedDayStart === null) return;
-    if (!stats.heatmap.some((day) => day.day_start_utc === selectedDayStart)) {
-      setSelectedDayStart(null);
-      setDayVisibleCount(DAY_SESSION_PAGE_SIZE);
-    }
-  }, [stats, selectedDayStart]);
-
-  useEffect(() => {
     setDayVisibleCount(DAY_SESSION_PAGE_SIZE);
   }, [selectedDayStart]);
 
-  const selectedDay = useMemo(() => {
-    if (!stats || selectedDayStart === null) return null;
-    return stats.heatmap.find((item) => item.day_start_utc === selectedDayStart) ?? null;
-  }, [stats, selectedDayStart]);
-  const visibleDaySessions = useMemo(() => selectedDay?.session_refs.slice(0, dayVisibleCount) ?? [], [selectedDay, dayVisibleCount]);
   const sourceLabel = sourceFilter === "all" ? "全部来源" : sourceFilter;
   const projectLabel = projectKey || "全部项目";
   const waitingForStatsQuery = dateBounds.error === null && (!projectSelectionReady || requestedStatsQueryKey !== statsQueryKey);
+  const statsGranularity: StatsBucketGranularity = resolvedTimeWindow.mode === "day" ? "hour" : "day";
+  const trendItems = useMemo(() => {
+    if (!stats) return [];
+    if (statsGranularity === "hour") {
+      return stats.hourly_activity.map((item) => hourlyToTrendItem(item, dateBounds.startAt));
+    }
+    return stats.daily_series;
+  }, [dateBounds.startAt, stats, statsGranularity]);
+  const heatmapItems = useMemo(() => {
+    if (!stats) return [];
+    if (statsGranularity === "hour") {
+      return stats.hourly_activity.map((item) => hourlyToHeatmapDay(item, dateBounds.startAt));
+    }
+    return stats.heatmap;
+  }, [dateBounds.startAt, stats, statsGranularity]);
+  const selectedBucket = useMemo(() => {
+    if (selectedDayStart === null) return null;
+    return heatmapItems.find((item) => item.day_start_utc === selectedDayStart) ?? null;
+  }, [heatmapItems, selectedDayStart]);
+  const visibleBucketSessions = useMemo(
+    () => selectedBucket?.session_refs.slice(0, dayVisibleCount) ?? [],
+    [dayVisibleCount, selectedBucket]
+  );
+  const heatmapTitle = statsGranularity === "hour" ? "24 小时会话热力图" : "会话热力图";
+  const selectedBucketTitle = selectedBucket
+    ? `${formatBucketLabel(selectedBucket.day_start_utc, statsGranularity)} 会话`
+    : statsGranularity === "hour"
+      ? "选择小时查看会话"
+      : "选择热力图日期查看会话";
+  const emptyBucketText = statsGranularity === "hour" ? "该小时无会话" : "当天无会话";
+  const selectHintText =
+    statsGranularity === "hour"
+      ? "点击上方小时方块后，这里会展示该小时会话清单。"
+      : "点击上方热力图方块后，这里会展示当天会话清单。";
+
+  useEffect(() => {
+    if (selectedDayStart === null) return;
+    if (!heatmapItems.some((item) => item.day_start_utc === selectedDayStart)) {
+      setSelectedDayStart(null);
+      setDayVisibleCount(DAY_SESSION_PAGE_SIZE);
+    }
+  }, [heatmapItems, selectedDayStart]);
 
   const refreshStats = () => {
     if (!projectSelectionReady || dateBounds.error || dateBounds.startAt === null || dateBounds.endAt === null) return;
@@ -994,7 +1085,7 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
                 <KpiStrip stats={stats} />
                 <TokenCompositionStrip stats={stats} />
                 <ContextNote sourceLabel={sourceLabel} projectLabel={projectLabel} dateRangeLabel={dateRangeLabel} stats={stats} />
-                <DailyUsageTrendChart items={stats.daily_series} />
+                <DailyUsageTrendChart items={trendItems} granularity={statsGranularity} />
 
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                   <ProjectRanking
@@ -1018,17 +1109,22 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
                 </div>
 
                 <section className="rounded-xl bg-bg-secondary p-4">
-                  <div className="mb-3 text-[13px] font-semibold text-text-primary">会话热力图</div>
-                  <TimelineHeatmap days={stats.heatmap} selectedDayStart={selectedDayStart} onSelectDay={(day) => setSelectedDayStart(day.day_start_utc)} />
+                  <div className="mb-3 text-[13px] font-semibold text-text-primary">{heatmapTitle}</div>
+                  <TimelineHeatmap
+                    days={heatmapItems}
+                    selectedDayStart={selectedDayStart}
+                    onSelectDay={(day) => setSelectedDayStart(day.day_start_utc)}
+                    granularity={statsGranularity}
+                  />
                 </section>
 
                 <section className="rounded-xl bg-bg-secondary p-4">
                   <div className="mb-2 text-[13px] font-semibold text-text-primary">
-                    {selectedDay ? `${formatDay(selectedDay.day_start_utc)} 会话` : "选择热力图日期查看会话"}
+                    {selectedBucketTitle}
                   </div>
-                  {!selectedDay && <div className="text-[12px] font-medium text-text-muted">点击上方热力图方块后，这里会展示当天会话清单。</div>}
-                  {selectedDay && selectedDay.session_refs.length === 0 && <div className="text-[12px] font-medium text-text-muted">当天无会话</div>}
-                  {visibleDaySessions.map((session) => (
+                  {!selectedBucket && <div className="text-[12px] font-medium text-text-muted">{selectHintText}</div>}
+                  {selectedBucket && selectedBucket.session_refs.length === 0 && <div className="text-[12px] font-medium text-text-muted">{emptyBucketText}</div>}
+                  {visibleBucketSessions.map((session) => (
                     <button
                       key={makeSessionKey(session)}
                       onClick={() => {
@@ -1042,9 +1138,9 @@ export function StatsPanel({ open, onClose, onOpenSession }: StatsPanelProps) {
                       </div>
                     </button>
                   ))}
-                  {selectedDay && dayVisibleCount < selectedDay.session_refs.length && (
+                  {selectedBucket && dayVisibleCount < selectedBucket.session_refs.length && (
                     <Button onClick={() => setDayVisibleCount((prev) => prev + DAY_SESSION_PAGE_SIZE)} className="mt-2 w-full" size="sm">
-                      加载更多 ({dayVisibleCount}/{selectedDay.session_refs.length})
+                      加载更多 ({dayVisibleCount}/{selectedBucket.session_refs.length})
                     </Button>
                   )}
                 </section>

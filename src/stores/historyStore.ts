@@ -380,10 +380,23 @@ function normalizeProjectEfficiency(raw: unknown): HistoryStatsProjectEfficiency
 
 function normalizeHourlyActivity(raw: unknown): HistoryStatsHourlyActivityItem {
   const rec = (raw ?? {}) as Record<string, unknown>;
+  const sessionRefsRaw = rec.session_refs ?? rec.sessionRefs;
+  const sessionRefs = Array.isArray(sessionRefsRaw)
+    ? (sessionRefsRaw as unknown[])
+    : [];
   return {
     hour: asNumber(rec.hour),
+    hour_start_utc: asNumber(rec.hour_start_utc ?? rec.hourStartUtc),
     sessions: asNumber(rec.sessions),
     messages: asNumber(rec.messages),
+    level: asNumber(rec.level),
+    input_tokens: asNumber(rec.input_tokens ?? rec.inputTokens),
+    output_tokens: asNumber(rec.output_tokens ?? rec.outputTokens),
+    cache_read_tokens: asNumber(rec.cache_read_tokens ?? rec.cacheReadTokens),
+    cache_creation_tokens: asNumber(rec.cache_creation_tokens ?? rec.cacheCreationTokens),
+    total_cost_usd: asNumber(rec.total_cost_usd ?? rec.totalCostUsd ?? rec.totalCostUSD),
+    unpriced_tokens: asNumber(rec.unpriced_tokens ?? rec.unpricedTokens),
+    session_refs: sessionRefs.map((item) => normalizeSummary(item)),
   };
 }
 

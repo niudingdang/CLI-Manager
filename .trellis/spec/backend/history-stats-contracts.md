@@ -48,6 +48,20 @@ interface HistoryStatsPayload {
   total_cache_creation_tokens: number;
   total_cost_usd: number;
   total_unpriced_tokens: number;
+  hourly_activity: Array<{
+    hour: number;
+    hour_start_utc: number;
+    sessions: number;
+    messages: number;
+    level: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+    total_cost_usd: number;
+    unpriced_tokens: number;
+    session_refs: HistorySessionSummary[];
+  }>;
 }
 ```
 
@@ -59,7 +73,8 @@ interface HistoryStatsPayload {
 - Codex `input_tokens` **includes** `cached_input_tokens`. Extraction normalizes to non-cached input + `cache_read_tokens` (Claude semantics), so pricing applies uniformly with no source-specific input deduction.
 - Usage lines without a model (e.g. Codex `token_count` events) attribute to the most recent model seen in the session (e.g. from `turn_context.payload.model`).
 - The `<synthetic>` model (Claude error placeholder lines) must never enter model distribution or model attribution.
-- Stats aggregates must include input, output, cache read, cache creation, estimated cost, and unpriced token counts at every exposed level: total, project, model, source, daily series, and heatmap day.
+- Stats aggregates must include input, output, cache read, cache creation, estimated cost, and unpriced token counts at every exposed usage level: total, project, model, source, daily series, and hourly activity.
+- Heatmap-compatible buckets must include `sessions`, `messages`, `level`, and `session_refs`. Daily heatmap buckets use `day_start_utc`; hourly activity buckets use `hour_start_utc` plus `hour` so the frontend can render 24-hour drilldowns without guessing local bucket anchors.
 - `historyStore` must accept snake_case payload fields and legacy camelCase fallbacks when normalizing stats data. `normalizeDetail` must pass message token fields through (it previously dropped them, making per-session token panels read 0).
 - Unknown or unsupported models must not fake a price. They contribute to `unpriced_tokens` and `total_cost_usd` remains unaffected unless an explicit cost exists in the source payload.
 - Explicit cost fields from the source payload take priority over local model-price estimation. Explicit cost and token counts may live on different JSON levels (e.g. top-level `costUSD` + `message.usage`); extraction must merge them instead of returning the first matching candidate.
@@ -72,6 +87,7 @@ interface HistoryStatsPayload {
 | Condition | Required behavior |
 |---|---|
 | Missing usage field | Count tokens and cost as zero. |
+| Older cached/frontend payload lacks hourly token/cost/session fields | Normalize missing hourly fields to zero counts and an empty `session_refs` array. |
 | Usage field has unknown shape | Ignore unknown fields; keep the message/session readable. |
 | Model pricing not found | Add all usage tokens to `unpriced_tokens`; do not estimate cost. |
 | Explicit cost is present | Use explicit cost and do not add those tokens to `unpriced_tokens`. |
@@ -82,7 +98,7 @@ interface HistoryStatsPayload {
 ### 5. Good/Base/Bad Cases
 
 - Good: a Claude session with input/output/cache usage and known model produces complete totals, cost, model distribution, daily trend, and per-session message token fields.
-- Base: a Codex session without model pricing still appears in stats with token totals and `unpriced_tokens`.
+- Base: a Codex session without model pricing still appears in stats with token totals and `unpriced_tokens`; a single-day stats view can map `hourly_activity` into 24 hourly trend and heatmap buckets.
 - Bad: frontend assumes a newly added numeric field is always present and renders `NaN` when older cached payloads omit it.
 
 ### 6. Tests Required
@@ -95,6 +111,7 @@ interface HistoryStatsPayload {
 - Frontend checks:
   - `npm run build` must pass after payload/type changes.
   - Stats UI must render missing token/cost fields as zero, not `NaN`.
+  - Single-day stats must use `hourly_activity` for Token/cost trend and session heatmap; multi-day ranges must keep using `daily_series` and `heatmap`.
 - Release checks:
   - `cargo test` must pass before tagging a release that changes history stats contracts.
 
@@ -115,4 +132,3 @@ const cost = asNumber(rec.total_cost_usd ?? rec.totalCostUsd ?? rec.totalCostUSD
 ```
 
 Normalize at the store boundary so UI components only consume stable numeric fields.
-

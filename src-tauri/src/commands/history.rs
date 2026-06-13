@@ -349,8 +349,17 @@ pub struct HistoryStatsProjectEfficiencyItem {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryStatsHourlyActivityItem {
     pub hour: u8,
+    pub hour_start_utc: i64,
     pub sessions: usize,
     pub messages: usize,
+    pub level: u8,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_cost_usd: f64,
+    pub unpriced_tokens: u64,
+    pub session_refs: Vec<HistorySessionSummary>,
 }
 
 #[derive(Clone, Serialize)]
@@ -410,6 +419,13 @@ struct UsageTokenScan {
 struct HourStatsAggregate {
     sessions: usize,
     messages: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    total_cost_usd: f64,
+    unpriced_tokens: u64,
+    session_refs: Vec<HistorySessionSummary>,
 }
 
 #[derive(Clone, Copy)]
@@ -958,6 +974,23 @@ fn build_history_stats_response(
         let hour = hour_of_day_for_stats(summary.updated_at, bounds);
         hourly_map[hour].sessions += 1;
         hourly_map[hour].messages += summary.message_count;
+        hourly_map[hour].input_tokens = hourly_map[hour]
+            .input_tokens
+            .saturating_add(computed.stats.input_tokens);
+        hourly_map[hour].output_tokens = hourly_map[hour]
+            .output_tokens
+            .saturating_add(computed.stats.output_tokens);
+        hourly_map[hour].cache_read_tokens = hourly_map[hour]
+            .cache_read_tokens
+            .saturating_add(computed.stats.cache_read_tokens);
+        hourly_map[hour].cache_creation_tokens = hourly_map[hour]
+            .cache_creation_tokens
+            .saturating_add(computed.stats.cache_creation_tokens);
+        hourly_map[hour].total_cost_usd += computed.stats.total_cost_usd;
+        hourly_map[hour].unpriced_tokens = hourly_map[hour]
+            .unpriced_tokens
+            .saturating_add(computed.stats.unpriced_tokens);
+        hourly_map[hour].session_refs.push(summary.clone());
 
         let project_entry =
             project_map
@@ -1197,13 +1230,30 @@ fn build_history_stats_response(
             .then(a.project_key.cmp(&b.project_key))
     });
 
+    let max_hour_sessions = hourly_map.iter().map(|item| item.sessions).max().unwrap_or(0);
     let hourly_activity: Vec<HistoryStatsHourlyActivityItem> = hourly_map
-        .iter()
+        .into_iter()
         .enumerate()
-        .map(|(hour, agg)| HistoryStatsHourlyActivityItem {
-            hour: hour as u8,
-            sessions: agg.sessions,
-            messages: agg.messages,
+        .map(|(hour, mut agg)| {
+            agg.session_refs.sort_by(|a, b| {
+                b.updated_at
+                    .cmp(&a.updated_at)
+                    .then(a.session_id.cmp(&b.session_id))
+            });
+            HistoryStatsHourlyActivityItem {
+                hour: hour as u8,
+                hour_start_utc: bounds.start_day + hour as i64 * HOUR_MS,
+                sessions: agg.sessions,
+                messages: agg.messages,
+                level: calc_heat_level(agg.sessions, max_hour_sessions),
+                input_tokens: agg.input_tokens,
+                output_tokens: agg.output_tokens,
+                cache_read_tokens: agg.cache_read_tokens,
+                cache_creation_tokens: agg.cache_creation_tokens,
+                total_cost_usd: agg.total_cost_usd,
+                unpriced_tokens: agg.unpriced_tokens,
+                session_refs: agg.session_refs,
+            }
         })
         .collect();
 

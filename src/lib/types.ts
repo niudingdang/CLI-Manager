@@ -271,8 +271,17 @@ export interface HistoryStatsProjectEfficiencyItem {
 
 export interface HistoryStatsHourlyActivityItem {
   hour: number;
+  hour_start_utc: number;
   sessions: number;
   messages: number;
+  level: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  total_cost_usd: number;
+  unpriced_tokens: number;
+  session_refs: HistorySessionSummary[];
 }
 
 export interface HistoryStatsPayload {
