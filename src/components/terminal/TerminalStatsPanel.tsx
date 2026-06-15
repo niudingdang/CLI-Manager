@@ -159,7 +159,7 @@ export function TerminalStatsPanel({ activeSessionId, open }: TerminalStatsPanel
       return;
     }
     // 切换 Tab（项目路径或 CLI 来源变化）时立即清空旧数据，避免短暂展示错误的模型/上下文
-    const scopeKey = `${projectPath}|${sourceFilter ?? ""}`;
+    const scopeKey = `${projectPath}|${sourceFilter ?? ""}|${terminalSession?.cliSessionId ?? ""}`;
     if (lastPathRef.current !== scopeKey) {
       lastPathRef.current = scopeKey;
       latestRef.current = null;
@@ -174,7 +174,7 @@ export function TerminalStatsPanel({ activeSessionId, open }: TerminalStatsPanel
       const prev = current
         ? { filePath: current.file_path, updatedAt: current.updated_at }
         : undefined;
-      const result = await fetchLatestProjectSessionDetail(projectPath, prev, sourceFilter);
+      const result = await fetchLatestProjectSessionDetail(projectPath, prev, sourceFilter, terminalSession?.cliSessionId);
       if (cancelled) return;
       if (result !== "unchanged") {
         latestRef.current = result;
@@ -197,7 +197,7 @@ export function TerminalStatsPanel({ activeSessionId, open }: TerminalStatsPanel
     };
     // activeSessionId 入依赖：切换 Tab 时立即重新核对最近会话（unchanged 时开销仅一次列表查询）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, projectPath, sourceFilter, refreshSeq, activeSessionId]);
+  }, [open, projectPath, sourceFilter, terminalSession?.cliSessionId, refreshSeq, activeSessionId]);
 
   // 今日项目用量：会话数据变化时同步刷新（与终端 CLI 来源保持一致）
   useEffect(() => {

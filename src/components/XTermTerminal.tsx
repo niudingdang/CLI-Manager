@@ -399,18 +399,24 @@ export function XTermTerminal({ sessionId, isActive = true, fontSize = 14, fontF
     if (!isActiveRef.current || activeWriteQueueRef.current.length === 0) return;
     const terminal = terminalRef.current;
     if (!terminal) return;
-    noteTerminalWriteActivity();
+
+    const writeTerminalChunk = (chunk: string) => {
+      terminal.write(chunk, () => {
+        if (terminalRef.current !== terminal) return;
+        noteTerminalWriteActivity();
+      });
+    };
 
     let budget = ACTIVE_WRITE_FRAME_BUDGET;
     while (budget > 0 && activeWriteQueueRef.current.length > 0) {
       const chunk = activeWriteQueueRef.current[0];
       if (chunk.length <= budget) {
-        terminal.write(chunk);
+        writeTerminalChunk(chunk);
         activeWriteQueueRef.current.shift();
         budget -= chunk.length;
         continue;
       }
-      terminal.write(chunk.slice(0, budget));
+      writeTerminalChunk(chunk.slice(0, budget));
       activeWriteQueueRef.current[0] = chunk.slice(budget);
       budget = 0;
     }
