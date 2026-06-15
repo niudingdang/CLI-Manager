@@ -523,12 +523,11 @@ export async function fetchLatestProjectSessionDetail(
       return (summariesRaw ?? []).map((item) => normalizeSummary(item))[0] ?? null;
     };
     const sessionQuery = cliSessionId?.trim() || null;
-    // 有 CLI 会话 ID 时严格按该会话查找；命中不到也不回退到项目最近会话，
-    // 否则同项目多个终端会互相串显另一个窗口的会话数据。
-    // 仅在完全没有 CLI 会话 ID（无 hook 环境）时才回退项目最近会话。
-    const summary = sessionQuery
-      ? await loadSummary(sessionQuery)
-      : await loadSummary(null);
+    // 有 CLI 会话 ID 时优先按该会话查找；命中不到时回退项目最近会话，
+    // 让会话信息卡/今日用量等「非 token 类」数据仍能正常展示。
+    // token 类卡片的串显由调用方按 session_id 与 cliSessionId 比对门控，
+    // 此处回退不会造成 token 数据泄漏。
+    const summary = (sessionQuery ? await loadSummary(sessionQuery) : null) ?? await loadSummary(null);
     if (!summary) return null;
     if (prev && summary.file_path === prev.filePath && summary.updated_at === prev.updatedAt) {
       return "unchanged";

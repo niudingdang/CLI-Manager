@@ -16,7 +16,7 @@ const CODEX_HOOKS_FILE_NAME: &str = "hooks.json";
 const CODEX_CONFIG_FILE_NAME: &str = "config.toml";
 
 const CLAUDE_APPROVAL_SCRIPT: &str = r#"param(
-    [ValidateSet("UserPromptSubmit", "Notification")]
+    [ValidateSet("SessionStart", "UserPromptSubmit", "Notification")]
     [string]$Event = "Notification"
 )
 
@@ -51,6 +51,7 @@ try {
     }
 
     $title = switch ($Event) {
+        "SessionStart" { "Claude Code session started" }
         "UserPromptSubmit" { "Claude Code running" }
         default { "Claude Code needs attention" }
     }
@@ -166,7 +167,7 @@ exit 0
 "#;
 
 const CODEX_ATTENTION_SCRIPT: &str = r#"param(
-    [ValidateSet("UserPromptSubmit", "PermissionRequest")]
+    [ValidateSet("SessionStart", "UserPromptSubmit", "PermissionRequest")]
     [string]$Event = "PermissionRequest"
 )
 
@@ -201,6 +202,7 @@ try {
     }
 
     $title = switch ($Event) {
+        "SessionStart" { "Codex CLI session started" }
         "UserPromptSubmit" { "Codex CLI running" }
         default { "Codex CLI needs attention" }
     }
@@ -325,6 +327,7 @@ pub struct ToolHookSettingsStatus {
     status: HookInstallStatus,
     attention_script_installed: bool,
     finished_script_installed: bool,
+    session_start_hook_installed: bool,
     running_hook_installed: bool,
     attention_hook_installed: bool,
     stop_hook_installed: bool,
@@ -449,8 +452,15 @@ fn install_claude_hooks(claude_dir: &Path) -> Result<(), String> {
     // 先清掉旧版本注册的条目（命令串/matcher 可能已变化），保证安装即升级
     remove_hook_commands(
         &mut settings,
-        &["UserPromptSubmit", "Notification", "Stop", "StopFailure"],
+        &["SessionStart", "UserPromptSubmit", "Notification", "Stop", "StopFailure"],
         &[CLAUDE_APPROVAL_SCRIPT_NAME, CLAUDE_FINISHED_SCRIPT_NAME],
+    );
+    // SessionStart：会话启动/恢复即回传 sessionId，绑定终端 Tab（不改 Tab 状态），
+    // 让实时统计面板无需先发指令即可填充。空 matcher 匹配全部 source。
+    add_hook_command(
+        &mut settings,
+        "SessionStart",
+        build_command(&hooks_dir.join(CLAUDE_APPROVAL_SCRIPT_NAME), "SessionStart"),
     );
     add_hook_command(
         &mut settings,
@@ -491,7 +501,7 @@ fn uninstall_claude_hooks(claude_dir: &Path) -> Result<(), String> {
     ensure_root_object(&settings, "settings.json")?;
     remove_hook_commands(
         &mut settings,
-        &["UserPromptSubmit", "Notification", "Stop", "StopFailure"],
+        &["SessionStart", "UserPromptSubmit", "Notification", "Stop", "StopFailure"],
         &[CLAUDE_APPROVAL_SCRIPT_NAME, CLAUDE_FINISHED_SCRIPT_NAME],
     );
     write_json(&settings_path, &settings)
@@ -517,8 +527,14 @@ fn install_codex_hooks(codex_dir: &Path) -> Result<(), String> {
     // 先清掉旧版本注册的条目，保证安装即升级
     remove_hook_commands(
         &mut settings,
-        &["UserPromptSubmit", "PermissionRequest", "Stop"],
+        &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"],
         &[CODEX_ATTENTION_SCRIPT_NAME, CODEX_FINISHED_SCRIPT_NAME],
+    );
+    // SessionStart：会话启动/恢复即回传 sessionId 绑定终端 Tab（不改 Tab 状态）
+    add_hook_command(
+        &mut settings,
+        "SessionStart",
+        build_command(&hooks_dir.join(CODEX_ATTENTION_SCRIPT_NAME), "SessionStart"),
     );
     add_hook_command(
         &mut settings,
@@ -630,7 +646,7 @@ fn uninstall_codex_hooks(codex_dir: &Path) -> Result<(), String> {
     ensure_root_object(&settings, "hooks.json")?;
     remove_hook_commands(
         &mut settings,
-        &["UserPromptSubmit", "PermissionRequest", "Stop"],
+        &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"],
         &[CODEX_ATTENTION_SCRIPT_NAME, CODEX_FINISHED_SCRIPT_NAME],
     );
     write_json(&hooks_path, &settings)
@@ -712,6 +728,10 @@ fn build_claude_status(claude_dir: Option<PathBuf>) -> Result<ToolHookSettingsSt
 
     let hooks_dir = claude_dir.join("hooks");
     let settings_path = claude_dir.join(CLAUDE_SETTINGS_FILE_NAME);
+    let session_start_command = build_command(
+        &hooks_dir.join(CLAUDE_APPROVAL_SCRIPT_NAME),
+        "SessionStart",
+    );
     let running_command = build_command(
         &hooks_dir.join(CLAUDE_APPROVAL_SCRIPT_NAME),
         "UserPromptSubmit",
@@ -725,6 +745,11 @@ fn build_claude_status(claude_dir: Option<PathBuf>) -> Result<ToolHookSettingsSt
     let checks = ToolChecks {
         attention_script_installed: hooks_dir.join(CLAUDE_APPROVAL_SCRIPT_NAME).is_file(),
         finished_script_installed: hooks_dir.join(CLAUDE_FINISHED_SCRIPT_NAME).is_file(),
+        session_start_hook_installed: exact_command_registered(
+            &settings,
+            "SessionStart",
+            &session_start_command,
+        ),
         running_hook_installed: exact_command_registered(
             &settings,
             "UserPromptSubmit",
@@ -762,6 +787,10 @@ fn build_codex_status(codex_dir: Option<PathBuf>) -> Result<ToolHookSettingsStat
     let hooks_dir = codex_dir.join("hooks");
     let hooks_path = codex_dir.join(CODEX_HOOKS_FILE_NAME);
     let config_path = codex_dir.join(CODEX_CONFIG_FILE_NAME);
+    let session_start_command = build_command(
+        &hooks_dir.join(CODEX_ATTENTION_SCRIPT_NAME),
+        "SessionStart",
+    );
     let running_command = build_command(
         &hooks_dir.join(CODEX_ATTENTION_SCRIPT_NAME),
         "UserPromptSubmit",
@@ -775,6 +804,11 @@ fn build_codex_status(codex_dir: Option<PathBuf>) -> Result<ToolHookSettingsStat
     let checks = ToolChecks {
         attention_script_installed: hooks_dir.join(CODEX_ATTENTION_SCRIPT_NAME).is_file(),
         finished_script_installed: hooks_dir.join(CODEX_FINISHED_SCRIPT_NAME).is_file(),
+        session_start_hook_installed: exact_command_registered(
+            &settings,
+            "SessionStart",
+            &session_start_command,
+        ),
         running_hook_installed: exact_command_registered(
             &settings,
             "UserPromptSubmit",
@@ -803,6 +837,7 @@ fn build_codex_status(codex_dir: Option<PathBuf>) -> Result<ToolHookSettingsStat
 struct ToolChecks {
     attention_script_installed: bool,
     finished_script_installed: bool,
+    session_start_hook_installed: bool,
     running_hook_installed: bool,
     attention_hook_installed: bool,
     stop_hook_installed: bool,
@@ -820,6 +855,7 @@ fn missing_status() -> Result<ToolHookSettingsStatus, String> {
         status: HookInstallStatus::DirectoryMissing,
         attention_script_installed: false,
         finished_script_installed: false,
+        session_start_hook_installed: false,
         running_hook_installed: false,
         attention_hook_installed: false,
         stop_hook_installed: false,
@@ -838,6 +874,7 @@ fn status_from_checks(
     let mut values = vec![
         checks.attention_script_installed,
         checks.finished_script_installed,
+        checks.session_start_hook_installed,
         checks.running_hook_installed,
         checks.attention_hook_installed,
         checks.stop_hook_installed,
@@ -862,6 +899,7 @@ fn status_from_checks(
         status,
         attention_script_installed: checks.attention_script_installed,
         finished_script_installed: checks.finished_script_installed,
+        session_start_hook_installed: checks.session_start_hook_installed,
         running_hook_installed: checks.running_hook_installed,
         attention_hook_installed: checks.attention_hook_installed,
         stop_hook_installed: checks.stop_hook_installed,

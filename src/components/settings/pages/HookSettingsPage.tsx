@@ -14,6 +14,7 @@ interface ToolHookSettingsStatus {
   status: HookInstallStatus;
   attentionScriptInstalled: boolean;
   finishedScriptInstalled: boolean;
+  sessionStartHookInstalled: boolean;
   runningHookInstalled: boolean;
   attentionHookInstalled: boolean;
   stopHookInstalled: boolean;
@@ -290,9 +291,11 @@ export function HookSettingsPage() {
   const codex = status?.codex;
   const claudeStatus = claude?.status ?? "directoryMissing";
   const codexStatus = codex?.status ?? "directoryMissing";
+  const claudeSessionStartInstalled = Boolean(claude?.attentionScriptInstalled && claude.sessionStartHookInstalled);
   const claudeRunningInstalled = Boolean(claude?.attentionScriptInstalled && claude.runningHookInstalled);
   const claudeAttentionInstalled = Boolean(claude?.attentionScriptInstalled && claude.attentionHookInstalled);
   const claudeFinishedInstalled = Boolean(claude?.finishedScriptInstalled && claude.stopHookInstalled && claude.failureHookInstalled);
+  const codexSessionStartInstalled = Boolean(codex?.attentionScriptInstalled && codex.sessionStartHookInstalled);
   const codexRunningInstalled = Boolean(codex?.attentionScriptInstalled && codex.runningHookInstalled);
   const codexAttentionInstalled = Boolean(codex?.attentionScriptInstalled && codex.attentionHookInstalled);
   const codexFinishedInstalled = Boolean(codex?.finishedScriptInstalled && codex.stopHookInstalled);
@@ -382,6 +385,7 @@ export function HookSettingsPage() {
 
           <Card className="bg-surface-container-low" p="xs" radius="lg">
             <SimpleGrid cols={{ base: 1, lg: 2 }} spacing={6}>
+              <CheckRow label="会话启动 Hook（SessionStart）" checked={claudeSessionStartInstalled} />
               <CheckRow label="运行中 Hook（UserPromptSubmit）" checked={claudeRunningInstalled} />
               <CheckRow label="待审批 Hook（Notification）" checked={claudeAttentionInstalled} />
               <CheckRow label="完成/异常 Hook（Stop / StopFailure）" checked={claudeFinishedInstalled} />
@@ -438,6 +442,7 @@ export function HookSettingsPage() {
 
           <Card className="bg-surface-container-low" p="xs" radius="lg">
             <SimpleGrid cols={{ base: 1, lg: 2 }} spacing={6}>
+              <CheckRow label="会话启动 Hook（SessionStart）" checked={codexSessionStartInstalled} />
               <CheckRow label="运行中 Hook（UserPromptSubmit）" checked={codexRunningInstalled} />
               <CheckRow label="待审批 Hook（PermissionRequest）" checked={codexAttentionInstalled} />
               <CheckRow label="完成 Hook（Stop）" checked={codexFinishedInstalled} />

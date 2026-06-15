@@ -315,7 +315,8 @@ function App() {
     if (!IN_TAURI) return;
     const unlistenPromise = listen<CliHookPayload>("claude-hook-notification", (event) => {
       const tabId = useTerminalStore.getState().handleCliHookEvent(event.payload);
-      if (tabId && event.payload.event !== "UserPromptSubmit") {
+      // SessionStart 仅用于绑定 sessionId（无需用户介入），与 UserPromptSubmit 一样不弹 toast
+      if (tabId && event.payload.event !== "UserPromptSubmit" && event.payload.event !== "SessionStart") {
         showClaudeHookToast(event.payload, tabId);
       }
     });

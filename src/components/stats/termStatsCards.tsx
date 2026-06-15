@@ -99,6 +99,9 @@ export function ModelContextCard({
           ? TERM.yellow
           : TERM.green;
   const animatedPercent = useCountUp(usagePercent ?? 0);
+  // 未绑定空态（session 为 null）补骨架占位（徽章/剩余行/进度条），高度与有数据时一致；
+  // 非空会话维持原生行为，历史会话面板不受影响
+  const isEmpty = !session;
 
   return (
     <StatCard
@@ -107,6 +110,8 @@ export function ModelContextCard({
       headerRight={
         usagePercent !== null ? (
           <HeaderPill color={percentColor}>{animatedPercent.toFixed(1)}%</HeaderPill>
+        ) : isEmpty ? (
+          <HeaderPill color={TERM.dim}>—</HeaderPill>
         ) : undefined
       }
     >
@@ -121,14 +126,20 @@ export function ModelContextCard({
         value={contextLimit ? formatCompactCount(contextLimit) : "—"}
         color={TERM.fg}
       />
-      {remaining !== null && (
+      {remaining !== null ? (
         <Row label="剩余空间" value={formatCompactCount(remaining)} color={percentColor} />
-      )}
-      {usagePercent !== null && (
+      ) : isEmpty ? (
+        <Row label="剩余空间" value="—" color={TERM.dim} />
+      ) : null}
+      {usagePercent !== null ? (
         <div className="mt-1.5">
           <ProgressBar ratio={usagePercent / 100} color={percentColor} />
         </div>
-      )}
+      ) : isEmpty ? (
+        <div className="mt-1.5">
+          <ProgressBar ratio={0} color={TERM.dim} />
+        </div>
+      ) : null}
     </StatCard>
   );
 }
@@ -157,14 +168,24 @@ export function TrendCard({ session }: { session: HistorySessionDetail | null })
   }
   const recent = points.slice(-TREND_POINT_LIMIT);
   const peakTokens = recent.length > 0 ? Math.max(...recent) : 0;
+  const hasTrend = recent.length >= 2;
+  // 未绑定空态（session 为 null）补骨架占位，使高度与有数据时一致；
+  // 非空会话维持原生行为，历史会话面板不受影响
+  const isEmpty = !session;
 
   return (
     <StatCard
       icon={<Activity size={13} />}
       title="Token 趋势"
-      headerRight={recent.length >= 2 ? <HeaderPill color={TERM.cyan}>{recent.length} 条</HeaderPill> : undefined}
+      headerRight={
+        hasTrend ? (
+          <HeaderPill color={TERM.cyan}>{recent.length} 条</HeaderPill>
+        ) : isEmpty ? (
+          <HeaderPill color={TERM.cyan}>—</HeaderPill>
+        ) : undefined
+      }
     >
-      {recent.length >= 2 ? (
+      {hasTrend ? (
         <Sparkline points={recent} color={TERM.cyan} height={40} />
       ) : (
         <div
@@ -174,14 +195,19 @@ export function TrendCard({ session }: { session: HistorySessionDetail | null })
           {recent.length === 1 ? `仅 1 个趋势点：${formatCompactCount(peakTokens)}` : "暂无趋势数据"}
         </div>
       )}
-      {recent.length >= 2 && (
+      {hasTrend ? (
         <div className="mt-1 flex justify-between text-[10px]" style={{ color: TERM.dim }}>
           <span>{sourceLabel}</span>
           <span>
             峰值 {formatCompactCount(peakTokens)}
           </span>
         </div>
-      )}
+      ) : isEmpty ? (
+        <div className="mt-1 flex justify-between text-[10px]" style={{ color: TERM.dim }}>
+          <span>{sourceLabel}</span>
+          <span>峰值 {formatCompactCount(peakTokens)}</span>
+        </div>
+      ) : null}
     </StatCard>
   );
 }
@@ -232,13 +258,19 @@ export function ToolsCard({ session }: { session: HistorySessionDetail | null })
   const toolCalls = usage?.tool_call_count ?? 0;
   const mcpCalls = usage?.mcp_calls ?? [];
   const skillCalls = usage?.skill_calls ?? [];
+  // 未绑定空态（session 为 null）补徽章占位，顶部与有数据时一致
+  const isEmpty = !session;
 
   return (
     <StatCard
       icon={<Wrench size={13} />}
       title="工具与扩展"
       headerRight={
-        toolCalls > 0 ? <HeaderPill color={TERM.blue}>{formatCompactCount(toolCalls)} 次</HeaderPill> : undefined
+        toolCalls > 0 ? (
+          <HeaderPill color={TERM.blue}>{formatCompactCount(toolCalls)} 次</HeaderPill>
+        ) : isEmpty ? (
+          <HeaderPill color={TERM.blue}>0 次</HeaderPill>
+        ) : undefined
       }
     >
       {mcpCalls.length === 0 && skillCalls.length === 0 ? (

@@ -9,3 +9,4 @@ pub mod background;
 pub mod hook_settings;
 pub mod ccusage;
 pub mod ccswitch;
+pub mod git;

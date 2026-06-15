@@ -795,39 +795,82 @@ export function XTermTerminal({ sessionId, isActive = true, fontSize = 14, fontF
         y: clampY(buffer.cursorY),
       };
 
-      const getInputAnchorCell = (row: number) => {
+      const rowText = (row: number) => {
         const line = buffer.getLine(buffer.viewportY + row);
-        if (!line) return null;
-        const text = line.translateToString(true);
-        // Strip leading box-drawing borders so Claude Code/Codex bordered input
-        // rows are recognized as input rows, not just bare "> " prompts.
-        const trimmed = text.trimStart().replace(TUI_BORDER_PREFIX_PATTERN, "");
-        if (!trimmed || !inputPromptPattern.test(trimmed)) return null;
+        return line ? line.translateToString(true) : null;
+      };
 
+      // Input box FIRST row: carries a "> " prompt after stripping any leading
+      // box-drawing border (Claude Code / Codex draw "│ > … │").
+      const rowIsPromptRow = (row: number) => {
+        const text = rowText(row);
+        if (text === null) return false;
+        const trimmed = text.trimStart().replace(TUI_BORDER_PREFIX_PATTERN, "");
+        return Boolean(trimmed) && inputPromptPattern.test(trimmed);
+      };
+
+      // The input box is delimited by horizontal rules ("─────"), NOT vertical
+      // borders — Claude Code draws "───── / > line1 / ·  line2 / ─────". Detect
+      // the bottom rule so the downward scan knows where the box ends.
+      const rowIsHorizontalRule = (row: number) => {
+        const text = rowText(row);
+        if (text === null) return false;
+        const trimmed = text.trim();
+        return trimmed.length > 0 && /^[─━═╌╍┄┅┈┉╴╶]+$/u.test(trimmed);
+      };
+
+      // Anchor just past the last real (non-blank, non-border) glyph on a row.
+      const anchorAtRowTextEnd = (row: number) => {
+        const line = buffer.getLine(buffer.viewportY + row);
+        if (!line) return { x: 0, y: clampY(row) };
         for (let x = Math.min(terminal.cols, line.length) - 1; x >= 0; x -= 1) {
           const cell = line.getCell(x);
           const chars = cell?.getChars().trim();
-          // Skip blanks and the right border glyph; anchor after the typed text.
+          // Skip blanks and any border glyph; anchor right after the typed text.
           if (!cell || !chars || TUI_BORDER_CHAR_PATTERN.test(chars)) continue;
-          return { x: clampX(x + Math.max(1, cell.getWidth())), y: row };
+          return { x: clampX(x + Math.max(1, cell.getWidth())), y: clampY(row) };
         }
-
-        return { x: clampX(text.length + 1), y: row };
+        // Blank row (a freshly opened continuation line): sit at its indent so
+        // the IME lands where the next glyph will appear.
+        const text = line.translateToString(true);
+        const indent = text.length - text.replace(/^\s+/u, "").length;
+        return { x: clampX(indent > 0 ? indent : 1), y: clampY(row) };
       };
 
-      // The current input box is always the bottom-most one on screen: both
-      // TUIs (Claude Code / Codex) and plain shells keep it pinned to the
-      // bottom. Scanning up from the last row makes the anchor immune to the
-      // hardware cursor — which the TUI flings to spinner/tail lines or hides
-      // outright — and to decoy "> " rows higher up (e.g. echoed history
-      // messages); a cursor-centered nearest-row scan would wrongly latch onto
-      // those when the cursor drifts mid-redraw.
+      // Locate the input box (always the bottom-most one — immune to the
+      // hardware cursor the TUI flings around). Scan UP for its prompt row, then
+      // find the bottom horizontal rule below it. The active input line is the
+      // box's last row: in a multi-line box the user types on it while only the
+      // first row keeps the "> " prompt and continuation rows are bare indents.
+      // A single-line box (only the prompt row has content, with a blank pad row
+      // before the rule) anchors on the prompt row itself. Purely structural.
       for (let row = terminal.rows - 1; row >= 0; row -= 1) {
-        const anchor = getInputAnchorCell(row);
-        if (!anchor) continue;
-        // Cursor sitting on the input row itself: trust its exact column so a
-        // mid-line caret in a plain shell keeps the IME glued to the caret.
-        return cursor.y === row ? cursor : anchor;
+        if (!rowIsPromptRow(row)) continue;
+
+        let ruleRow = terminal.rows;
+        for (let r = row + 1; r < terminal.rows; r += 1) {
+          if (rowIsHorizontalRule(r)) { ruleRow = r; break; }
+        }
+        const boxBottom = Math.max(row, ruleRow - 1);
+
+        // Last non-blank row inside the box.
+        let lastContentRow = row;
+        for (let r = row + 1; r <= boxBottom; r += 1) {
+          if ((rowText(r) ?? "").trim().length > 0) lastContentRow = r;
+        }
+
+        // Only the prompt row carries content → single-line box, anchor there
+        // (its trailing blank pad row is not an input line). Otherwise the box is
+        // multi-line and the active line is its bottom row (possibly a blank,
+        // freshly-opened continuation line the user just wrapped to).
+        const anchorRow = lastContentRow === row ? row : boxBottom;
+
+        // Plain shell, single line, cursor genuinely on it → exact in-line caret.
+        const anchor = anchorRow === row && cursor.y === row
+          ? cursor
+          : anchorAtRowTextEnd(anchorRow);
+
+        return anchor;
       }
 
       // No input box on screen (full-screen TUI without a prompt): the hardware

@@ -30,7 +30,7 @@ import {
 
 export type SessionStatus = "running" | "exited" | "error";
 export type CliHookSource = "claude" | "codex";
-export type CliHookEventName = "UserPromptSubmit" | "Notification" | "Stop" | "StopFailure" | "PermissionRequest";
+export type CliHookEventName = "SessionStart" | "UserPromptSubmit" | "Notification" | "Stop" | "StopFailure" | "PermissionRequest";
 export type TabNotificationState = "none" | "running" | "attention" | "done" | "failed";
 export type ShellRuntimeEventName = "command_started" | "command_finished" | "prompt_shown";
 
@@ -186,6 +186,8 @@ function logTerminalExitStatus(session: TerminalSession, payload: PtyStatusPaylo
 }
 
 function mapCliHookEvent(event: CliHookEventName): TabNotificationState | null {
+  // SessionStart 仅用于回传 sessionId 绑定 Tab，不改变 Tab 状态
+  if (event === "SessionStart") return null;
   if (event === "UserPromptSubmit") return "running";
   // Notification 经 settings.json matcher 过滤，只有 permission_prompt /
   // idle_prompt（需要用户介入）会送达
