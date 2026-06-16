@@ -403,53 +403,16 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
         <Divider />
 
         {/* 配置 Tabs */}
-        <Tabs defaultValue="provider" variant="outline">
+        <Tabs defaultValue="merged" variant="outline">
           <Tabs.List>
+            <Tabs.Tab value="merged">完整配置</Tabs.Tab>
             <Tabs.Tab value="provider">供应商配置</Tabs.Tab>
             {commonConfigsLoaded && commonConfig && (
               <Tabs.Tab value="common">通用配置 ({provider.appType})</Tabs.Tab>
             )}
-            <Tabs.Tab value="merged">完整配置</Tabs.Tab>
           </Tabs.List>
 
-          {/* Tab 1: 供应商配置 */}
-          <Tabs.Panel value="provider" pt="xs">
-            <Group justify="space-between" mb="xs">
-              <Text size="xs" c="var(--text-muted)">
-                供应商原始配置
-              </Text>
-              <CopyButton value={provider.rawSettingsConfig} label="已复制" />
-            </Group>
-            {providerConfig ? (
-              <JsonCodeBlock json={JSON.stringify(providerConfig, null, 2)} />
-            ) : (
-              <Box className="rounded-md bg-surface-container-lowest/70 px-3 py-2">
-                <Text size="xs" c="var(--text-muted)">
-                  配置解析失败
-                </Text>
-              </Box>
-            )}
-          </Tabs.Panel>
-
-          {/* Tab 2: 通用配置 */}
-          {commonConfigsLoaded && commonConfig && (
-            <Tabs.Panel value="common" pt="xs">
-              <Group justify="space-between" mb="xs">
-                <Text size="xs" c="var(--text-muted)">
-                  common_config_{provider.appType}（来自 settings 表）
-                </Text>
-                <CopyButton
-                  value={typeof commonConfig === "string" ? commonConfig : JSON.stringify(commonConfig, null, 2)}
-                  label="已复制通用配置"
-                />
-              </Group>
-              <JsonCodeBlock
-                json={typeof commonConfig === "string" ? commonConfig : JSON.stringify(commonConfig, null, 2)}
-              />
-            </Tabs.Panel>
-          )}
-
-          {/* Tab 3: 完整配置 */}
+          {/* Tab 1: 完整配置 */}
           <Tabs.Panel value="merged" pt="xs">
             <Group justify="space-between" mb="xs">
               <Text size="xs" c="var(--text-muted)">
@@ -472,6 +435,43 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
               </Box>
             )}
           </Tabs.Panel>
+
+          {/* Tab 2: 供应商配置 */}
+          <Tabs.Panel value="provider" pt="xs">
+            <Group justify="space-between" mb="xs">
+              <Text size="xs" c="var(--text-muted)">
+                供应商原始配置
+              </Text>
+              <CopyButton value={provider.rawSettingsConfig} label="已复制" />
+            </Group>
+            {providerConfig ? (
+              <JsonCodeBlock json={JSON.stringify(providerConfig, null, 2)} />
+            ) : (
+              <Box className="rounded-md bg-surface-container-lowest/70 px-3 py-2">
+                <Text size="xs" c="var(--text-muted)">
+                  配置解析失败
+                </Text>
+              </Box>
+            )}
+          </Tabs.Panel>
+
+          {/* Tab 3: 通用配置 */}
+          {commonConfigsLoaded && commonConfig && (
+            <Tabs.Panel value="common" pt="xs">
+              <Group justify="space-between" mb="xs">
+                <Text size="xs" c="var(--text-muted)">
+                  common_config_{provider.appType}（来自 settings 表）
+                </Text>
+                <CopyButton
+                  value={typeof commonConfig === "string" ? commonConfig : JSON.stringify(commonConfig, null, 2)}
+                  label="已复制通用配置"
+                />
+              </Group>
+              <JsonCodeBlock
+                json={typeof commonConfig === "string" ? commonConfig : JSON.stringify(commonConfig, null, 2)}
+              />
+            </Tabs.Panel>
+          )}
         </Tabs>
       </Stack>
     </Card>
