@@ -142,6 +142,10 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
 }
 
 fn parse_git2_status(status: git2::Status) -> (&'static str, bool) {
+    // 冲突优先：合并/变基产生的冲突文件，独立标识 "C"，避免被当成普通修改而误提交。
+    if status.is_conflicted() {
+        return ("C", false);
+    }
     // 优先级：INDEX (staged) > WT (worktree)
     if status.is_index_new() {
         return ("A", true);
@@ -1062,6 +1066,8 @@ pub struct GitBranchStatus {
     pub has_upstream: bool,
     /// 是否处于 detached HEAD。
     pub detached: bool,
+    /// 进行中的操作："merge" / "rebase"；无则 None。驱动前端冲突横幅与「中止/继续」入口。
+    pub pending_op: Option<String>,
 }
 
 /// 查询当前分支名、upstream 及 ahead/behind。全只读，不触网。
@@ -1077,6 +1083,16 @@ pub async fn git_branch_status(project_path: String) -> Result<GitBranchStatus, 
         }
         let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
+        // 进行中的合并/变基（git2 仓库状态）。变基期间 HEAD 通常 detached，
+        // 需在 detached 早返回前计算，避免漏报。
+        let pending_op = match repo.state() {
+            git2::RepositoryState::Merge => Some("merge".to_string()),
+            git2::RepositoryState::Rebase
+            | git2::RepositoryState::RebaseInteractive
+            | git2::RepositoryState::RebaseMerge => Some("rebase".to_string()),
+            _ => None,
+        };
+
         let empty = GitBranchStatus {
             branch: None,
             upstream: None,
@@ -1084,6 +1100,7 @@ pub async fn git_branch_status(project_path: String) -> Result<GitBranchStatus, 
             behind: 0,
             has_upstream: false,
             detached: false,
+            pending_op: pending_op.clone(),
         };
 
         // HEAD 不存在 → unborn 分支（尚无提交）。
@@ -1134,6 +1151,7 @@ pub async fn git_branch_status(project_path: String) -> Result<GitBranchStatus, 
             behind,
             has_upstream,
             detached: false,
+            pending_op,
         })
     })
     .await
@@ -1241,13 +1259,110 @@ pub async fn git_push(
     .map_err(|e| format!("task_failed: {e}"))?
 }
 
-/// 仅快进拉取（`git pull --ff-only`）。无法快进 → not_fast_forward，由前端引导去终端处理。
-/// 绝不产生合并提交或冲突状态。
+/// 把拉取策略映射为 git 参数。
+/// - merge：`--no-rebase`，可快进时自动快进，分叉时生成合并提交（`--no-edit` 用默认信息免编辑器挂起）。
+/// - rebase：`--rebase`，把本地提交变基到远端之上，保持线性历史。
+/// - ff-only：仅快进，分叉则失败（保留旧行为）。
+/// merge/rebase 均加 `--autostash`：拉取前自动暂存脏工作区、完成后恢复；冲突中止时一并恢复，绝不静默丢改动。
+fn pull_args(strategy: &str) -> Result<Vec<&'static str>, String> {
+    match strategy {
+        "merge" => Ok(vec!["pull", "--no-rebase", "--no-edit", "--autostash"]),
+        "rebase" => Ok(vec!["pull", "--rebase", "--autostash"]),
+        "ff-only" => Ok(vec!["pull", "--ff-only"]),
+        _ => Err("invalid_strategy".to_string()),
+    }
+}
+
+/// 执行 git 子命令并区分「冲突」与普通失败。合并/变基的冲突提示多写到 stdout，
+/// 故合并 stdout+stderr 检测；命中 → 稳定错误码 `pull_conflict`（前端引导解决/继续/中止），
+/// 否则回退通用错误映射。成功返回合并输出。
+fn run_git_conflict_aware(project_path: &str, args: &[&str]) -> Result<String, String> {
+    let path = Path::new(project_path);
+    if !path.exists() {
+        return Err("path_not_found".to_string());
+    }
+    let output = std::process::Command::new("git")
+        .current_dir(path)
+        .args(args)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "git_not_found".to_string()
+            } else {
+                format!("spawn_failed: {e}")
+            }
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        return Ok(format!("{stdout}{stderr}").trim().to_string());
+    }
+    let combined = format!("{stdout}\n{stderr}").to_lowercase();
+    if combined.contains("conflict")
+        || combined.contains("automatic merge failed")
+        || combined.contains("could not apply")
+        || combined.contains("needs merge")
+        || combined.contains("fix conflicts")
+    {
+        let snippet: String = format!("{stdout}{stderr}").trim().chars().take(300).collect();
+        return Err(format!("pull_conflict: {snippet}"));
+    }
+    Err(map_git_cli_error(&stderr))
+}
+
+/// 按策略拉取当前分支（merge / rebase / ff-only）。shell out 系统 git，继承凭据/代理/SSH。
+/// 分叉时 merge/rebase 可直接拉取，无需切终端；冲突返回 `pull_conflict`，可经 git_pull_abort 安全回退。
 #[tauri::command]
-pub async fn git_pull_ff_only(project_path: String) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || run_git_cli(&project_path, &["pull", "--ff-only"]))
-        .await
-        .map_err(|e| format!("task_failed: {e}"))?
+pub async fn git_pull(project_path: String, strategy: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let args = pull_args(&strategy)?;
+        run_git_conflict_aware(&project_path, &args)
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 中止进行中的合并/变基，回到拉取前状态（`--autostash` 暂存的改动会一并恢复）。
+/// 依据 git2 仓库状态自动选择 `rebase --abort` 或 `merge --abort`。
+#[tauri::command]
+pub async fn git_pull_abort(project_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let rebasing = {
+            let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+            matches!(
+                repo.state(),
+                git2::RepositoryState::Rebase
+                    | git2::RepositoryState::RebaseInteractive
+                    | git2::RepositoryState::RebaseMerge
+            )
+        };
+        let args: &[&str] = if rebasing {
+            &["rebase", "--abort"]
+        } else {
+            &["merge", "--abort"]
+        };
+        run_git_cli(&project_path, args)
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 变基冲突解决并暂存后继续变基。`-c core.editor=true` 跳过提交信息编辑器避免挂起；
+/// 仍有未解决冲突 → `pull_conflict`，前端维持冲突态。
+#[tauri::command]
+pub async fn git_rebase_continue(project_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        run_git_conflict_aware(
+            &project_path,
+            &["-c", "core.editor=true", "rebase", "--continue"],
+        )
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
 }
 
 /// 开始监听项目目录文件变化（fs-watcher）。失败返回错误，前端据此降级为慢轮询。

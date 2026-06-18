@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import { RefreshCw, GitBranch, Undo2, Files, FilePen, FilePlus, FileMinus, GitCommitHorizontal, ArrowUp, ArrowDown, Upload, Download } from "lucide-react";
+import { RefreshCw, GitBranch, Undo2, Files, FilePen, FilePlus, FileMinus, GitCommitHorizontal, ArrowUp, ArrowDown, Upload, Download, ChevronDown, GitMerge, Check, X } from "lucide-react";
 import { useGitStore } from "../../stores/gitStore";
 import { GitChangesTree } from "./GitChangesTree";
 import { StageCheckbox, type StageState } from "./StageCheckbox";
@@ -10,7 +10,7 @@ import { STATUS_CONFIG } from "./GitStatusIcon";
 import { DiffViewerModal } from "./DiffViewerModal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { TERM, EmptyHint } from "../stats/termStatsUi";
-import type { GitTreeNode } from "../../lib/types";
+import type { GitTreeNode, GitPullStrategy } from "../../lib/types";
 
 interface GitChangesPanelProps {
   open: boolean;
@@ -28,6 +28,7 @@ function formatGitNetError(prefix: string, raw: string): string {
   if (raw.includes("not_fast_forward")) return `${prefix}：远端有新提交，请先拉取`;
   if (raw.includes("no_upstream")) return `${prefix}：当前分支未跟踪远端`;
   if (raw.includes("no_remote")) return `${prefix}：未配置远端或无法连接远端`;
+  if (raw.includes("pull_conflict")) return `${prefix}：存在冲突，请解决后继续或中止`;
   if (raw.includes("git_not_found")) return `${prefix}：未找到 git，可执行文件不在 PATH`;
   // 其余去掉错误码前缀，保留原始片段。
   return `${prefix}：${raw.replace(/^[a-z_]+:\s*/, "")}`;
@@ -74,7 +75,9 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     pushing,
     pulling,
     push,
-    pullFfOnly,
+    pull,
+    pullAbort,
+    rebaseContinue,
     selectedUntracked,
     setUntrackedSelection,
     clearUntrackedSelection,
@@ -86,6 +89,7 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
   const [confirmAllOpen, setConfirmAllOpen] = useState(false);
   const [discardTarget, setDiscardTarget] = useState<{ path: string; name: string; status: string } | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
+  const [pullMenuOpen, setPullMenuOpen] = useState(false);
   const panelActive = open && visible;
 
   useEffect(() => {
@@ -215,6 +219,10 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     .filter((c) => c.status !== "U" && c.status !== "??" && c.status !== "A")
     .map((c) => c.path);
 
+  // 冲突态：存在冲突文件(C) 或 仓库处于合并/变基中 → 显示冲突横幅与中止/继续入口。
+  const hasConflicts = changes.some((c) => c.status === "C");
+  const pendingOp = branchStatus?.pendingOp ?? null;
+
   const handleToggleSelectAll = () => {
     if (selectAllState === "checked") {
       // 全部取消：取消暂存 M/D/R + 清空未跟踪选中 + 取消勾选全部 A（A 保持跟踪，不 unstage）。
@@ -276,17 +284,49 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     }
   };
 
-  const handlePull = async () => {
+  const handlePull = async (strategy: GitPullStrategy) => {
     if (pulling) return;
     try {
-      await pullFfOnly();
+      await pull(strategy);
       toast.success("已拉取远端更新");
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
-      if (m.includes("not_fast_forward")) {
-        toast.error("远端与本地分叉，无法快进。请到终端手动合并/变基。");
+      if (m.includes("pull_conflict")) {
+        toast.error(
+          strategy === "rebase"
+            ? "变基存在冲突：解决并暂存后点击「继续」，或中止拉取。"
+            : "合并存在冲突：解决冲突后在下方提交以完成合并，或中止拉取。",
+        );
+      } else if (m.includes("not_fast_forward")) {
+        toast.error("无法快进（已分叉）。请改用「合并」或「变基」方式拉取。");
       } else {
         toast.error(formatGitNetError("拉取失败", m));
+      }
+    }
+  };
+
+  const handlePullAbort = async () => {
+    if (pulling) return;
+    try {
+      await pullAbort();
+      toast.success("已中止，恢复到拉取前");
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      toast.error(formatGitNetError("中止失败", m));
+    }
+  };
+
+  const handleRebaseContinue = async () => {
+    if (pulling) return;
+    try {
+      await rebaseContinue();
+      toast.success("变基已继续");
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      if (m.includes("pull_conflict")) {
+        toast.error("仍有未解决的冲突，请解决并暂存后再继续。");
+      } else {
+        toast.error(formatGitNetError("继续变基失败", m));
       }
     }
   };
@@ -491,17 +531,62 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
             </span>
             <span className="flex shrink-0 items-center gap-1.5">
               {showPull && (
-                <button
-                  type="button"
-                  onClick={() => void handlePull()}
-                  disabled={pulling}
-                  className="ui-focus-ring flex items-center gap-1 rounded px-2 py-0.5 text-[11px] transition-opacity hover:opacity-80 disabled:opacity-40"
-                  style={{ color: TERM.cyan, border: `1px solid ${TERM.cyan}55` }}
-                  title="拉取远端更新（仅快进）"
-                >
-                  <Download size={12} />
-                  {pulling ? "拉取中…" : `拉取 ${behind}`}
-                </button>
+                <span className="relative flex items-stretch">
+                  <button
+                    type="button"
+                    onClick={() => void handlePull("merge")}
+                    disabled={pulling}
+                    className="ui-focus-ring flex items-center gap-1 rounded-l px-2 py-0.5 text-[11px] transition-opacity hover:opacity-80 disabled:opacity-40"
+                    style={{ color: TERM.cyan, border: `1px solid ${TERM.cyan}55`, borderRight: "none" }}
+                    title="拉取远端更新（合并；可快进时自动快进）"
+                  >
+                    <Download size={12} />
+                    {pulling ? "拉取中…" : `拉取 ${behind}`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPullMenuOpen((v) => !v)}
+                    disabled={pulling}
+                    className="ui-focus-ring flex items-center justify-center rounded-r px-1 transition-opacity hover:opacity-80 disabled:opacity-40"
+                    style={{ color: TERM.cyan, border: `1px solid ${TERM.cyan}55` }}
+                    title="选择拉取方式"
+                    aria-haspopup="menu"
+                    aria-expanded={pullMenuOpen}
+                  >
+                    <ChevronDown size={12} />
+                  </button>
+                  {pullMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-[19]" onClick={() => setPullMenuOpen(false)} />
+                      <div
+                        className="absolute bottom-full right-0 z-20 mb-1 min-w-[148px] overflow-hidden rounded border shadow-lg"
+                        style={{ backgroundColor: TERM.bg, borderColor: TERM.dim }}
+                        role="menu"
+                      >
+                        {([
+                          { s: "merge", label: "合并拉取", desc: "保留两边历史" },
+                          { s: "rebase", label: "变基拉取", desc: "线性历史" },
+                          { s: "ff-only", label: "仅快进", desc: "不产生合并" },
+                        ] as { s: GitPullStrategy; label: string; desc: string }[]).map((o) => (
+                          <button
+                            key={o.s}
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setPullMenuOpen(false);
+                              void handlePull(o.s);
+                            }}
+                            className="flex w-full items-center justify-between gap-3 px-2 py-1 text-left text-[11px] transition-opacity hover:opacity-80"
+                            style={{ color: TERM.fg }}
+                          >
+                            <span>{o.label}</span>
+                            <span className="text-[9px]" style={{ color: TERM.dim }}>{o.desc}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </span>
               )}
               <button
                 type="button"
@@ -518,6 +603,49 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
           </div>
         );
       })()}
+
+      {/* 冲突横幅：合并/变基进行中或存在冲突文件时出现，提供「继续」(变基) 与「中止」安全退路。 */}
+      {projectPath && (pendingOp || hasConflicts) && (
+        <div
+          className="flex shrink-0 flex-col gap-1.5 border-t px-2 py-1.5"
+          style={{ borderColor: `${STATUS_CONFIG.C.color}55`, backgroundColor: `${STATUS_CONFIG.C.color}12` }}
+        >
+          <span className="flex items-center gap-1.5 text-[11px] font-bold" style={{ color: STATUS_CONFIG.C.color }}>
+            <GitMerge size={12} strokeWidth={2} />
+            {pendingOp === "rebase" ? "变基进行中" : "合并进行中"}
+            {hasConflicts && <span className="font-normal">· 存在冲突</span>}
+          </span>
+          <span className="text-[10px] leading-snug" style={{ color: TERM.dim }}>
+            {pendingOp === "rebase"
+              ? "解决冲突文件并暂存后点击「继续」，或中止回到拉取前。"
+              : "解决冲突文件后在下方提交以完成合并，或中止回到拉取前。"}
+          </span>
+          <span className="flex items-center gap-1.5">
+            {pendingOp === "rebase" && (
+              <button
+                type="button"
+                onClick={() => void handleRebaseContinue()}
+                disabled={pulling || hasConflicts}
+                className="ui-focus-ring flex items-center gap-1 rounded px-2 py-0.5 text-[11px] transition-opacity hover:opacity-80 disabled:opacity-40"
+                style={{ color: TERM.green, border: `1px solid ${TERM.green}55` }}
+                title={hasConflicts ? "请先解决并暂存所有冲突文件" : "继续变基"}
+              >
+                <Check size={12} /> 继续
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void handlePullAbort()}
+              disabled={pulling}
+              className="ui-focus-ring flex items-center gap-1 rounded px-2 py-0.5 text-[11px] transition-opacity hover:opacity-80 disabled:opacity-40"
+              style={{ color: STATUS_CONFIG.C.color, border: `1px solid ${STATUS_CONFIG.C.color}55` }}
+              title="中止合并/变基，恢复到拉取前"
+            >
+              <X size={12} /> 中止
+            </button>
+          </span>
+        </div>
+      )}
 
       {/* 提交栏：仅文件级 stage + commit（无 AI） */}
       {projectPath && changes.length > 0 && (

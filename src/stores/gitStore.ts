@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { GitFileChange, GitTreeNode, GitBranchStatus } from "../lib/types";
+import type { GitFileChange, GitTreeNode, GitBranchStatus, GitPullStrategy } from "../lib/types";
 
 type GitStatusFilter = "all" | "M" | "A" | "D" | "U";
 
@@ -57,7 +57,12 @@ interface GitStore {
   setAddedDeselection: (paths: string[], deselected: boolean) => void;
   commit: (message: string) => Promise<string>;
   push: () => Promise<string>;
-  pullFfOnly: () => Promise<string>;
+  /** 按策略拉取（merge/rebase/ff-only）。分叉时 merge/rebase 可直接拉取，冲突抛 pull_conflict。 */
+  pull: (strategy: GitPullStrategy) => Promise<string>;
+  /** 中止进行中的合并/变基，恢复到拉取前。 */
+  pullAbort: () => Promise<void>;
+  /** 变基冲突解决并暂存后继续。 */
+  rebaseContinue: () => Promise<string>;
   toggleDir: (path: string) => void;
   collapseAllDirs: () => void;
   expandAllDirs: () => void;
@@ -483,19 +488,62 @@ export const useGitStore = create<GitStore>((set, get) => ({
     }
   },
 
-  pullFfOnly: async () => {
+  pull: async (strategy) => {
     const { currentProjectPath } = get();
     if (!currentProjectPath) throw new Error("no_project");
     set({ pulling: true, error: null });
     try {
-      const out = await invoke<string>("git_pull_ff_only", { projectPath: currentProjectPath });
+      const out = await invoke<string>("git_pull", { projectPath: currentProjectPath, strategy });
       // 拉取改动工作区与提交，需同时刷新变更列表与分支状态。
       await get().fetchChanges(currentProjectPath, true);
+      await get().fetchBranchStatus(currentProjectPath);
       return out;
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[GitStore] 拉取失败:`, err);
       set({ error: errorMsg });
+      // 冲突等失败也刷新：让冲突文件(C)与 pendingOp 在 UI 呈现，驱动横幅与中止/继续。
+      await get().fetchChanges(currentProjectPath, true);
+      await get().fetchBranchStatus(currentProjectPath);
+      throw err;
+    } finally {
+      set({ pulling: false });
+    }
+  },
+
+  pullAbort: async () => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath) throw new Error("no_project");
+    set({ pulling: true, error: null });
+    try {
+      await invoke<string>("git_pull_abort", { projectPath: currentProjectPath });
+      await get().fetchChanges(currentProjectPath, true);
+      await get().fetchBranchStatus(currentProjectPath);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 中止拉取失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    } finally {
+      set({ pulling: false });
+    }
+  },
+
+  rebaseContinue: async () => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath) throw new Error("no_project");
+    set({ pulling: true, error: null });
+    try {
+      const out = await invoke<string>("git_rebase_continue", { projectPath: currentProjectPath });
+      await get().fetchChanges(currentProjectPath, true);
+      await get().fetchBranchStatus(currentProjectPath);
+      return out;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 继续变基失败:`, err);
+      set({ error: errorMsg });
+      await get().fetchChanges(currentProjectPath, true);
+      await get().fetchBranchStatus(currentProjectPath);
       throw err;
     } finally {
       set({ pulling: false });

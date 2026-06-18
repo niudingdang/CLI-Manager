@@ -8,9 +8,11 @@
 
 - **分支状态行**：提交栏顶部新增当前分支与 `↑ahead ↓behind`（待推送 / 落后数）；无 upstream 显示「未跟踪远端」，detached HEAD 单独标识。
 - **推送**：ahead>0 或无 upstream 时可点；无 upstream 自动 `push -u origin <branch>` 建立跟踪。
-- **拉取**：远端领先（behind>0）时出现「拉取」按钮，执行 `git pull --ff-only`；无法快进（分叉）时提示到终端手动合并 / 变基，绝不产生合并提交或冲突状态。
+- **拉取（分体按钮，JetBrains 式）**：behind>0 时出现「拉取」按钮，主按钮默认**合并**拉取（`pull --no-rebase --no-edit --autostash`，可快进时自动快进、分叉时生成合并提交）；下拉可选**变基**（`pull --rebase --autostash`）或**仅快进**（`pull --ff-only`）。`--autostash` 自动暂存脏工作区并在完成 / 中止时恢复，分叉场景不再需要切到终端手动处理。
+- **冲突处理**：合并 / 变基产生冲突时，冲突文件以独立「C」状态红色标识；面板出现「合并 / 变基进行中」横幅——合并解决后在下方提交即完成，变基解决并暂存后点「继续」（`rebase --continue`，跳过编辑器）；任意时刻可「中止」回到拉取前（依仓库状态自动 `merge --abort` / `rebase --abort`，恢复 autostash），绝不静默丢改动。
+- **分支状态扩展**：`git_branch_status` 新增 `pendingOp`（merge / rebase 进行中，变基 detached 期间亦可靠上报），刷新后冲突横幅与「继续 / 中止」入口依然准确。
 - **走系统 git**：本地只读用 libgit2，网络操作（push/pull）shell out 系统 `git`，继承用户凭据管理器、SSH 与 git config 代理；错误码映射为可读中文（认证失败 / 远端领先 / 未跟踪远端 / 未配置远端 / 找不到 git）。
-- **后端新增命令**：`git_branch_status`（只读分支/ahead-behind）、`git_push`、`git_pull_ff_only`、`git_commit_paths`（按路径 pathspec 提交）。
+- **后端命令**：`git_branch_status`（只读分支 / ahead-behind / pendingOp）、`git_push`、`git_pull`（策略 merge/rebase/ff-only，冲突感知）、`git_pull_abort`、`git_rebase_continue`、`git_commit_paths`（按路径 pathspec 提交）。
 
 #### 暂存模型重构（区分「跟踪」与「本次提交」）
 
