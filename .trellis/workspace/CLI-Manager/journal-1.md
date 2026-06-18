@@ -99,3 +99,36 @@ Filled the frontend Trellis spec files, verified build, and captured current UI/
 ### Next Steps
 
 - 人工验证三场景：Claude Code 流式输出期间中文 IME、Codex、普通 shell 行内 caret 移动
+
+
+## Session 3: V1.1.4 统计计费口径与界面一致性收口
+
+**Date**: 2026-06-18
+**Task**: V1.1.4 统计计费口径与界面一致性收口
+**Branch**: `master`
+
+### Summary
+
+完成并提交 V1.1.4：统一模型价格计费来源、缓存用量文案、终端 Tab 状态展示、设置页外层容器和全局滚动条样式；归档 5 个 06-18 任务。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `271509d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
