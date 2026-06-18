@@ -2,7 +2,7 @@
 
 ## [V1.1.5] - 2026-06-18
 
-### Git 变更面板增强（真实行数 / 实时监听 / 语法高亮）
+### Git 变更面板增强（真实行数 / 实时监听 / 语法高亮 / 暂存提交）
 
 #### 真实 diff 行数统计
 
@@ -23,6 +23,14 @@
 - **diff 弹窗按语言高亮**：`DiffViewerModal` 接入 `react-diff-view` 原生支持的 refractor(Prism) tokenize，按文件扩展名启用语法高亮，token 高亮叠加在既有 +/− 行底色之上，行号、行选择与 hunk/行级回滚交互保持不变。
 - **精选语言控体积**：`refractor/core` 按依赖顺序注册 22 种常见语言（js/jsx/ts/tsx/json/css/scss/html/md/bash/rust/python/yaml/toml/sql/go/java/c/cpp/ruby/diff 等）；未知语言或高亮失败时回退无高亮渲染，diff 始终可读。
 - 新增 `src/components/git/diffHighlight.ts`（refractor 实例与语言探测），新增 Prism token 深色配色到 `diffViewer.css`，scoped 到 `.diff-viewer-container`。
+
+#### 文件级暂存与面板内提交
+
+- **暂存 / 取消暂存**：变更文件行新增暂存复选框（勾选 = `git add` 进暂存区，取消 = 移出），目录行三态复选框可批量暂存/取消整个目录；头部单个三态全选框（全选/部分/未选）一键全部暂存或取消。
+- **面板内提交**：底部新增提交栏，填写信息后「提交 (N)」提交已暂存内容（支持 Ctrl/Cmd+Enter）；空信息或无暂存时禁用；空信息 / 无暂存 / 未配置 git 身份均有明确错误提示；支持仓库首个提交（unborn HEAD）。
+- **未跟踪文件单独成组**：仿 JetBrains 将未跟踪（Unversioned）文件独立为「未跟踪文件」分组，已跟踪变更归入「改动」分组；两组折叠状态相互隔离（修复同名目录折叠串联）。
+- **右键 Git 管控**：文件 / 目录行右键菜单新增「暂存（git add）/ 取消暂存」，与复选框等价；复选框 hover 提示明确标注 git add / 移出暂存区。
+- **后端**：新增 `git_stage_file` / `git_unstage_file` / `git_stage_paths` / `git_unstage_paths` / `git_stage_all` / `git_unstage_all` / `git_commit` 命令（纯 libgit2，前端路径不可信校验，批量操作单次 index 写入避免刷新闪烁）。
 
 ## [V1.1.4] - 2026-06-18
 

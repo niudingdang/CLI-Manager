@@ -780,6 +780,229 @@ pub async fn git_revert_lines(
         .map_err(|e| format!("task_failed: {e}"))?
 }
 
+/// 暂存单个文件：worktree 存在 → add_path（新增/修改/未跟踪）；已删除 → remove_path。
+#[tauri::command]
+pub async fn git_stage_file(project_path: String, file_path: String) -> Result<(), String> {
+    validate_repo_relative_path(&file_path)?;
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
+        let rel = Path::new(&file_path);
+        if path.join(&file_path).exists() {
+            index.add_path(rel).map_err(|e| format!("stage_failed: {e}"))?;
+        } else {
+            index
+                .remove_path(rel)
+                .map_err(|e| format!("stage_remove_failed: {e}"))?;
+        }
+        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 取消暂存单个文件：有 HEAD → reset 到 HEAD；unborn 分支 → 从 index 移除。
+#[tauri::command]
+pub async fn git_unstage_file(project_path: String, file_path: String) -> Result<(), String> {
+    validate_repo_relative_path(&file_path)?;
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        match repo.head().and_then(|h| h.peel_to_commit()) {
+            Ok(commit) => {
+                repo.reset_default(Some(commit.as_object()), [file_path.as_str()])
+                    .map_err(|e| format!("unstage_failed: {e}"))?;
+            }
+            Err(_) => {
+                // 尚无提交：直接从 index 移除该路径。
+                let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
+                index
+                    .remove_path(Path::new(&file_path))
+                    .map_err(|e| format!("unstage_remove_failed: {e}"))?;
+                index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 全部暂存：add_all 收新增/修改/未跟踪，update_all 补已跟踪文件的删除。
+#[tauri::command]
+pub async fn git_stage_all(project_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
+        index
+            .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+            .map_err(|e| format!("stage_all_failed: {e}"))?;
+        index
+            .update_all(["*"], None)
+            .map_err(|e| format!("stage_all_update_failed: {e}"))?;
+        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 全部取消暂存：有 HEAD → index 重置为 HEAD tree；unborn → 清空 index。工作区不受影响。
+#[tauri::command]
+pub async fn git_unstage_all(project_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
+        match repo.head().and_then(|h| h.peel_to_tree()) {
+            Ok(tree) => {
+                index
+                    .read_tree(&tree)
+                    .map_err(|e| format!("unstage_all_failed: {e}"))?;
+            }
+            Err(_) => {
+                index.clear().map_err(|e| format!("index_clear_failed: {e}"))?;
+            }
+        }
+        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 批量暂存多个文件（目录批量勾选用）：单次 index 写入，避免逐文件往返刷新。
+#[tauri::command]
+pub async fn git_stage_paths(project_path: String, paths: Vec<String>) -> Result<(), String> {
+    for p in &paths {
+        validate_repo_relative_path(p)?;
+    }
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
+        for p in &paths {
+            let rel = Path::new(p);
+            if path.join(p).exists() {
+                index.add_path(rel).map_err(|e| format!("stage_failed: {e}"))?;
+            } else {
+                index
+                    .remove_path(rel)
+                    .map_err(|e| format!("stage_remove_failed: {e}"))?;
+            }
+        }
+        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 批量取消暂存多个文件：有 HEAD → 一次 reset_default；unborn → 逐个从 index 移除。
+#[tauri::command]
+pub async fn git_unstage_paths(project_path: String, paths: Vec<String>) -> Result<(), String> {
+    for p in &paths {
+        validate_repo_relative_path(p)?;
+    }
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        match repo.head().and_then(|h| h.peel_to_commit()) {
+            Ok(commit) => {
+                repo.reset_default(Some(commit.as_object()), paths.iter().map(|s| s.as_str()))
+                    .map_err(|e| format!("unstage_failed: {e}"))?;
+            }
+            Err(_) => {
+                let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
+                for p in &paths {
+                    index
+                        .remove_path(Path::new(p))
+                        .map_err(|e| format!("unstage_remove_failed: {e}"))?;
+                }
+                index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 提交已暂存内容。空信息 / 无暂存 / 无 git 身份返回稳定错误。成功返回短 commit id。
+#[tauri::command]
+pub async fn git_commit(project_path: String, message: String) -> Result<String, String> {
+    let msg = message.trim().to_string();
+    if msg.is_empty() {
+        return Err("empty_message".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&project_path);
+        if !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+
+        let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
+        let tree_oid = index
+            .write_tree()
+            .map_err(|e| format!("write_tree_failed: {e}"))?;
+
+        // HEAD 当前 commit（unborn 时为 None）。
+        let head_commit = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+
+        // 无暂存内容检测：暂存树与 HEAD 树一致（或 unborn 下 index 为空）→ 拒绝空提交。
+        match &head_commit {
+            Some(c) => {
+                let head_tree_oid = c.tree().map_err(|e| format!("head_tree_failed: {e}"))?.id();
+                if head_tree_oid == tree_oid {
+                    return Err("nothing_staged".to_string());
+                }
+            }
+            None => {
+                if index.is_empty() {
+                    return Err("nothing_staged".to_string());
+                }
+            }
+        }
+
+        let tree = repo
+            .find_tree(tree_oid)
+            .map_err(|e| format!("find_tree_failed: {e}"))?;
+        // 读取 user.name / user.email；缺失给出明确错误供前端引导配置。
+        let sig = repo.signature().map_err(|_| "no_git_identity".to_string())?;
+        let parents: Vec<&git2::Commit> = head_commit.as_ref().map(|c| vec![c]).unwrap_or_default();
+
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parents)
+            .map_err(|e| format!("commit_failed: {e}"))?;
+
+        Ok(oid.to_string().chars().take(7).collect::<String>())
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
 /// 开始监听项目目录文件变化（fs-watcher）。失败返回错误，前端据此降级为慢轮询。
 #[tauri::command]
 pub async fn git_watch_start(

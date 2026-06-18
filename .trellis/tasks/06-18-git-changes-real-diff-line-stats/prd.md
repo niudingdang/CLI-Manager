@@ -66,25 +66,38 @@
 
 ---
 
-## Phase 2 — 暂存 + 提交 + AI commit message（亮点，放最后）
+## Phase 2 — 暂存 + 面板内提交（文件级；不含 AI）
 
-### Requirements（初定，进入该阶段前再细化）
-- 文件级 stage / unstage；复用 P1 之外的 hunk/行级 stage（复用现有反向 patch 基建，`ApplyLocation::Index`）。
-- 面板内提交：提交信息输入框 + 提交按钮，仅提交已暂存内容。
-- AI 生成 commit message：基于已暂存 diff，生成 Conventional Commits 风格（仓库历史已是 `feat()/fix()/chore()`，可作 few-shot）。
-- 提交后刷新面板与分支态。
+> 决策（2026-06-18）：**AI commit message 不做**；stage 粒度**仅文件级**；主会话直接实现。
+> 本阶段聚焦把面板从「只读 + 回滚」补齐到「暂存 + 提交」的最小可用提交工作流。
 
-### 需要你决策（进入 P2 brainstorm 时确认，**先记录为开放项**）
-- **AI 模型来源**：复用项目已接入的 provider 配置（参考 `ccswitch-integration-contracts.md` 的 provider 解析），还是新增独立的 commit-message 模型设置？
-- **调用位置**：Rust 侧直连模型 API，还是前端复用现有 invoke/AI 通道？
-- **stage 粒度 MVP**：先只做文件级 stage/commit，hunk/行级 stage 留后续？
-- **commit message UX**：生成后直接填入可编辑框（推荐），还是多候选选择？
+### Requirements
+- 文件级 stage / unstage：文件行加暂存复选框，勾选进暂存区、取消出暂存区；头部提供「全部暂存 / 全部取消暂存」。
+- 面板内提交：底部提交栏含信息输入框 + 「提交 (N)」按钮（N=已暂存文件数），仅提交已暂存内容；空信息或无暂存时禁用。
+- 提交后刷新面板（暂存清空、变更列表更新）。
+- 复用现有单棵目录树与折叠逻辑，不重写为双区；暂存状态由后端 `GitFileChange.staged` 驱动复选框。
 
-### Out of Scope（P2 初定）
-- 不做 push / pull / fetch（远端操作另立任务）。
-- 不做 amend / rebase / cherry-pick。
+### Technical Approach
+- 后端新增命令（`git.rs`，全程 libgit2，遵循文件安全清单 + `validate_repo_relative_path`）：
+  - `git_stage_file`：worktree 有文件 → `index.add_path`；已删除 → `index.remove_path`；`index.write`。
+  - `git_unstage_file`：有 HEAD → `reset_default(HEAD, [path])`；unborn → `index.remove_path`。
+  - `git_stage_all` / `git_unstage_all`：全量 `add_all`+`update_all` / `index.read_tree(HEAD tree)`（unborn 用 `index.clear`）。
+  - `git_commit(message)`：`write_tree` + `repo.signature()` + `repo.commit(Some("HEAD"), …)`；空信息 / 无暂存 / 无 git 身份返回稳定错误。
+- 前端 `gitStore` 新增 `stageFile/unstageFile/stageAll/unstageAll/commit`，操作后 `fetchChanges(silent)`；新增 `committing` 态。
+- `GitChangesPanel` 加底部提交栏与头部全部暂存/取消；`GitTreeNode` 文件行加暂存复选框（`onToggleStage` 透传）。
 
-> 说明：P2 体量大、外向风险高（写 index、提交不可逆），进入时单独跑一轮 brainstorm 细化 prd 再实现。
+### Acceptance Criteria（P2）
+- [ ] 勾选文件即暂存、取消勾选即取消暂存，复选框反映真实 index 状态（含新增/修改/删除/未跟踪）。
+- [ ] 「全部暂存 / 全部取消暂存」对整列变更生效。
+- [ ] 填写信息后「提交 (N)」提交已暂存内容；提交后列表刷新、暂存清空。
+- [ ] 空信息或无暂存时提交按钮禁用；无 git 身份（user.name/email 缺失）给出明确错误不崩溃。
+- [ ] 初始提交（unborn HEAD）可正常暂存并完成首个 commit。
+- [ ] `cargo check` / `cargo test` / `npx tsc --noEmit` 通过。
+
+### Out of Scope
+- **不做 AI commit message**（本次明确排除）。
+- 不做 hunk / 行级 stage（仅文件级）。
+- 不做 push / pull / fetch / amend / rebase / cherry-pick（远端与高级操作另立任务）。
 
 ---
 

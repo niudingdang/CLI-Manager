@@ -4,20 +4,24 @@ import type { GitFileChange, GitTreeNode } from "../lib/types";
 
 type GitStatusFilter = "all" | "M" | "A" | "D" | "U";
 
-// 判断文件是否匹配当前筛选。
-// 「新增」(A) 视为一组：已暂存新增(A)、未跟踪(U/??) 都算新增，与面板的 addedCount 定义保持一致。
-function matchFilter(status: string, filter: GitStatusFilter): boolean {
-  if (filter === "all") return true;
-  if (filter === "A") return status === "A" || status === "U" || status === "??";
+// 判断已跟踪文件是否匹配当前筛选。未跟踪(U/??)单独成组展示，不参与此处筛选。
+function matchTrackedFilter(status: string, filter: GitStatusFilter): boolean {
+  if (filter === "all" || filter === "U") return true;
   return status === filter;
+}
+
+function isUntracked(status: string): boolean {
+  return status === "U" || status === "??";
 }
 
 interface GitStore {
   changes: GitFileChange[];
   tree: GitTreeNode[];
+  untrackedTree: GitTreeNode[];
   collapsedDirs: Set<string>;
   loading: boolean;
   discarding: boolean;
+  committing: boolean;
   error: string | null;
   currentProjectPath: string | null;
   statusFilter: GitStatusFilter;
@@ -27,6 +31,13 @@ interface GitStore {
   discardAll: () => Promise<void>;
   revertHunk: (diffText: string, hunkIndex: number) => Promise<void>;
   revertLines: (diffText: string, selectedLines: { side: "old" | "new"; lineNumber: number }[]) => Promise<void>;
+  stageFile: (filePath: string) => Promise<void>;
+  unstageFile: (filePath: string) => Promise<void>;
+  stagePaths: (paths: string[]) => Promise<void>;
+  unstagePaths: (paths: string[]) => Promise<void>;
+  stageAll: () => Promise<void>;
+  unstageAll: () => Promise<void>;
+  commit: (message: string) => Promise<string>;
   toggleDir: (path: string) => void;
   collapseAllDirs: () => void;
   expandAllDirs: () => void;
@@ -79,13 +90,23 @@ function buildTree(changes: GitFileChange[]): GitTreeNode[] {
   return root;
 }
 
-function collectDirectoryPaths(nodes: GitTreeNode[]): string[] {
+// 构建「已跟踪变更树」与「未跟踪文件树」。未跟踪文件单独成组（仿 JetBrains Unversioned Files）。
+function rebuildTrees(
+  changes: GitFileChange[],
+  filter: GitStatusFilter
+): { tree: GitTreeNode[]; untrackedTree: GitTreeNode[] } {
+  const tracked = changes.filter((c) => !isUntracked(c.status) && matchTrackedFilter(c.status, filter));
+  const untracked = changes.filter((c) => isUntracked(c.status));
+  return { tree: buildTree(tracked), untrackedTree: buildTree(untracked) };
+}
+
+function collectDirectoryPaths(nodes: GitTreeNode[], treeId: string): string[] {
   const paths: string[] = [];
 
   const visit = (items: GitTreeNode[]) => {
     for (const node of items) {
       if (node.type !== "directory") continue;
-      paths.push(node.path);
+      paths.push(`${treeId}:${node.path}`);
       visit(node.children ?? []);
     }
   };
@@ -97,9 +118,11 @@ function collectDirectoryPaths(nodes: GitTreeNode[]): string[] {
 export const useGitStore = create<GitStore>((set, get) => ({
   changes: [],
   tree: [],
+  untrackedTree: [],
   collapsedDirs: new Set(),
   loading: false,
   discarding: false,
+  committing: false,
   error: null,
   currentProjectPath: null,
   statusFilter: "all",
@@ -116,11 +139,10 @@ export const useGitStore = create<GitStore>((set, get) => ({
     try {
       const changes = await invoke<GitFileChange[]>("git_get_changes", { projectPath });
 
-      // 应用筛选
+      // 应用筛选并拆分已跟踪 / 未跟踪两棵树
       const { statusFilter } = get();
-      const filtered = changes.filter(c => matchFilter(c.status, statusFilter));
-      const tree = buildTree(filtered);
-      set({ changes, tree, loading: false });
+      const { tree, untrackedTree } = rebuildTrees(changes, statusFilter);
+      set({ changes, tree, untrackedTree, loading: false });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[GitStore] 获取 Git 变更失败:`, err);
@@ -210,6 +232,108 @@ export const useGitStore = create<GitStore>((set, get) => ({
     }
   },
 
+  stageFile: async (filePath: string) => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath) return;
+    try {
+      await invoke("git_stage_file", { projectPath: currentProjectPath, filePath });
+      await get().fetchChanges(currentProjectPath, true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 暂存文件失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    }
+  },
+
+  unstageFile: async (filePath: string) => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath) return;
+    try {
+      await invoke("git_unstage_file", { projectPath: currentProjectPath, filePath });
+      await get().fetchChanges(currentProjectPath, true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 取消暂存文件失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    }
+  },
+
+  stageAll: async () => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath) return;
+    try {
+      await invoke("git_stage_all", { projectPath: currentProjectPath });
+      await get().fetchChanges(currentProjectPath, true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 全部暂存失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    }
+  },
+
+  stagePaths: async (paths: string[]) => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath || paths.length === 0) return;
+    try {
+      await invoke("git_stage_paths", { projectPath: currentProjectPath, paths });
+      await get().fetchChanges(currentProjectPath, true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 批量暂存失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    }
+  },
+
+  unstagePaths: async (paths: string[]) => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath || paths.length === 0) return;
+    try {
+      await invoke("git_unstage_paths", { projectPath: currentProjectPath, paths });
+      await get().fetchChanges(currentProjectPath, true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 批量取消暂存失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    }
+  },
+
+  unstageAll: async () => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath) return;
+    try {
+      await invoke("git_unstage_all", { projectPath: currentProjectPath });
+      await get().fetchChanges(currentProjectPath, true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 全部取消暂存失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    }
+  },
+
+  commit: async (message: string) => {
+    const { currentProjectPath } = get();
+    if (!currentProjectPath) throw new Error("no_project");
+    set({ committing: true, error: null });
+    try {
+      const shortId = await invoke<string>("git_commit", { projectPath: currentProjectPath, message });
+      await get().fetchChanges(currentProjectPath, true);
+      return shortId;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 提交失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    } finally {
+      set({ committing: false });
+    }
+  },
+
   toggleDir: (path: string) => {
     set((state) => {
       const newCollapsed = new Set(state.collapsedDirs);
@@ -223,7 +347,12 @@ export const useGitStore = create<GitStore>((set, get) => ({
   },
 
   collapseAllDirs: () => {
-    set((state) => ({ collapsedDirs: new Set(collectDirectoryPaths(state.tree)) }));
+    set((state) => ({
+      collapsedDirs: new Set([
+        ...collectDirectoryPaths(state.tree, "tracked"),
+        ...collectDirectoryPaths(state.untrackedTree, "untracked"),
+      ]),
+    }));
   },
 
   expandAllDirs: () => {
@@ -232,9 +361,8 @@ export const useGitStore = create<GitStore>((set, get) => ({
 
   setStatusFilter: (filter: GitStatusFilter) => {
     set((state) => {
-      const filtered = state.changes.filter(c => matchFilter(c.status, filter));
-      const tree = buildTree(filtered);
-      return { statusFilter: filter, tree };
+      const { tree, untrackedTree } = rebuildTrees(state.changes, filter);
+      return { statusFilter: filter, tree, untrackedTree };
     });
   },
 
@@ -242,9 +370,11 @@ export const useGitStore = create<GitStore>((set, get) => ({
     set({
       changes: [],
       tree: [],
+      untrackedTree: [],
       collapsedDirs: new Set(),
       loading: false,
       discarding: false,
+      committing: false,
       error: null,
       currentProjectPath: null,
       statusFilter: "all",

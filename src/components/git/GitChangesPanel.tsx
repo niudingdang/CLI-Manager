@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { RefreshCw, GitBranch, Undo2, Files, FilePen, FilePlus, FileMinus } from "lucide-react";
+import { toast } from "sonner";
+import { RefreshCw, GitBranch, Undo2, Files, FilePen, FilePlus, FileMinus, GitCommitHorizontal } from "lucide-react";
 import { useGitStore } from "../../stores/gitStore";
 import { GitChangesTree } from "./GitChangesTree";
+import { StageCheckbox, type StageState } from "./StageCheckbox";
 import { STATUS_CONFIG } from "./GitStatusIcon";
 import { DiffViewerModal } from "./DiffViewerModal";
 import { ConfirmDialog } from "../ConfirmDialog";
@@ -20,13 +22,13 @@ interface GitChangesPanelProps {
 // 降级慢轮询间隔：仅当 fs-watcher 初始化失败（网络盘/WSL 等 notify 不可用）时启用。
 const FALLBACK_POLL_INTERVAL_MS = 15000;
 
-function collectDirectoryPaths(nodes: GitTreeNode[]): string[] {
+function collectDirectoryPaths(nodes: GitTreeNode[], treeId: string): string[] {
   const paths: string[] = [];
 
   const visit = (items: GitTreeNode[]) => {
     for (const node of items) {
       if (node.type !== "directory") continue;
-      paths.push(node.path);
+      paths.push(`${treeId}:${node.path}`);
       visit(node.children ?? []);
     }
   };
@@ -41,6 +43,7 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     reset,
     changes,
     tree,
+    untrackedTree,
     collapsedDirs,
     loading,
     statusFilter,
@@ -50,11 +53,20 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     discardFile,
     discardAll,
     discarding,
+    stageFile,
+    unstageFile,
+    stagePaths,
+    unstagePaths,
+    stageAll,
+    unstageAll,
+    commit,
+    committing,
   } = useGitStore();
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<{ path: string; name: string; status: string } | null>(null);
   const [confirmAllOpen, setConfirmAllOpen] = useState(false);
   const [discardTarget, setDiscardTarget] = useState<{ path: string; name: string; status: string } | null>(null);
+  const [commitMsg, setCommitMsg] = useState("");
   const panelActive = open && visible;
 
   useEffect(() => {
@@ -123,7 +135,10 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     };
   }, [panelActive, projectPath, fetchChanges]);
 
-  const directoryPaths = useMemo(() => collectDirectoryPaths(tree), [tree]);
+  const directoryPaths = useMemo(
+    () => [...collectDirectoryPaths(tree, "tracked"), ...collectDirectoryPaths(untrackedTree, "untracked")],
+    [tree, untrackedTree]
+  );
   const hasDirectories = directoryPaths.length > 0;
   const allCollapsed = hasDirectories && directoryPaths.every((path) => collapsedDirs.has(path));
 
@@ -157,6 +172,46 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
   // 总增删行数聚合（真实 diff 行数，后端 git_get_changes 提供）。
   const totalAdded = changes.reduce((sum, c) => sum + (c.added || 0), 0);
   const totalDeleted = changes.reduce((sum, c) => sum + (c.deleted || 0), 0);
+  // 已暂存文件数，驱动全选三态与提交栏。
+  const stagedCount = changes.filter((c) => c.staged).length;
+  // 顶部全选三态：全暂存=checked，部分=indeterminate，无=unchecked。
+  const selectAllState: StageState =
+    changes.length === 0 || stagedCount === 0
+      ? "unchecked"
+      : stagedCount === changes.length
+        ? "checked"
+        : "indeterminate";
+
+  const handleToggleStage = (filePath: string, staged: boolean) => {
+    void (staged ? unstageFile(filePath) : stageFile(filePath)).catch(() => {
+      toast.error("暂存操作失败，请刷新后重试");
+    });
+  };
+
+  const handleToggleStagePaths = (paths: string[], allStaged: boolean) => {
+    void (allStaged ? unstagePaths(paths) : stagePaths(paths)).catch(() => {
+      toast.error("批量暂存操作失败，请刷新后重试");
+    });
+  };
+
+  const handleCommit = async () => {
+    const msg = commitMsg.trim();
+    if (!msg || stagedCount === 0 || committing) return;
+    try {
+      const shortId = await commit(msg);
+      setCommitMsg("");
+      toast.success(`已提交 ${shortId}`);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      if (m.includes("no_git_identity")) {
+        toast.error("提交失败：未配置 git 身份（user.name / user.email）");
+      } else if (m.includes("nothing_staged")) {
+        toast.error("没有已暂存的改动");
+      } else {
+        toast.error(`提交失败：${m}`);
+      }
+    }
+  };
 
   const filterButtons = [
     { label: "全部", value: "all" as const, count: allCount, color: TERM.fg, icon: Files },
@@ -181,7 +236,17 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
           <GitBranch size={12} strokeWidth={2} />
           Git 变更
         </span>
-        <span className="flex items-center gap-1">
+        <span className="flex items-center gap-1.5">
+          {changes.length > 0 && (
+            <StageCheckbox
+              state={selectAllState}
+              onToggle={() => {
+                if (selectAllState === "checked") void unstageAll().catch(() => toast.error("全部取消暂存失败"));
+                else void stageAll().catch(() => toast.error("全部暂存失败"));
+              }}
+              title={selectAllState === "checked" ? "全部取消暂存（移出暂存区）" : "全部暂存（git add 所有变更）"}
+            />
+          )}
           {hasDirectories && (
             <button
               type="button"
@@ -289,9 +354,78 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
         ) : changes.length === 0 ? (
           <EmptyHint text="无文件变更" />
         ) : (
-          <GitChangesTree onFileClick={handleFileClick} onRequestDiscard={handleRequestDiscard} />
+          <>
+            {tree.length > 0 && (
+              <div>
+                <div className="mb-1 px-1 text-[10px] font-bold uppercase tracking-wide" style={{ color: TERM.dim }}>
+                  改动
+                </div>
+                <GitChangesTree
+                  nodes={tree}
+                  treeId="tracked"
+                  onFileClick={handleFileClick}
+                  onRequestDiscard={handleRequestDiscard}
+                  onToggleStage={handleToggleStage}
+                  onToggleStagePaths={handleToggleStagePaths}
+                />
+              </div>
+            )}
+            {/* 未跟踪文件单独成组（仿 JetBrains Unversioned Files），M/D 筛选下隐藏 */}
+            {untrackedTree.length > 0 && statusFilter !== "M" && statusFilter !== "D" && (
+              <div className={tree.length > 0 ? "mt-2 border-t pt-2" : ""} style={{ borderColor: TERM.dim }}>
+                <div className="mb-1 px-1 text-[10px] font-bold uppercase tracking-wide" style={{ color: TERM.dim }}>
+                  未跟踪文件
+                </div>
+                <GitChangesTree
+                  nodes={untrackedTree}
+                  treeId="untracked"
+                  onFileClick={handleFileClick}
+                  onRequestDiscard={handleRequestDiscard}
+                  onToggleStage={handleToggleStage}
+                  onToggleStagePaths={handleToggleStagePaths}
+                />
+              </div>
+            )}
+          </>
         )}
       </div>
+
+      {/* 提交栏：仅文件级 stage + commit（无 AI） */}
+      {projectPath && changes.length > 0 && (
+        <div className="shrink-0 border-t px-2 py-2" style={{ borderColor: TERM.dim }}>
+          <textarea
+            value={commitMsg}
+            onChange={(e) => setCommitMsg(e.target.value)}
+            onKeyDown={(e) => {
+              // Ctrl/Cmd+Enter 提交
+              if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                e.preventDefault();
+                void handleCommit();
+              }
+            }}
+            rows={2}
+            placeholder={stagedCount > 0 ? "提交信息（Ctrl+Enter 提交）" : "勾选文件以暂存后再提交"}
+            className="ui-thin-scroll w-full resize-none rounded px-2 py-1 text-[11px] outline-none"
+            style={{ backgroundColor: TERM.bg, color: TERM.fg, border: `1px solid ${TERM.dim}` }}
+          />
+          <div className="mt-1 flex items-center justify-between">
+            <span className="text-[10px]" style={{ color: TERM.dim }}>
+              已暂存 <span style={{ color: stagedCount > 0 ? TERM.green : TERM.dim }}>{stagedCount}</span> 个文件
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleCommit()}
+              disabled={committing || stagedCount === 0 || commitMsg.trim().length === 0}
+              className="ui-focus-ring flex items-center gap-1 rounded px-2 py-0.5 text-[11px] transition-opacity hover:opacity-80 disabled:opacity-40"
+              style={{ color: TERM.green, border: `1px solid ${TERM.green}55` }}
+              title="提交已暂存的改动"
+            >
+              <GitCommitHorizontal size={12} />
+              {committing ? "提交中…" : `提交 (${stagedCount})`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Diff Modal */}
       {selectedFile && projectPath && (
