@@ -165,6 +165,8 @@ interface Settings {
   codexHookConfigDir: string | null;
   /** cc-switch 数据库路径；null 表示使用默认路径 ~/.cc-switch/cc-switch.db */
   ccSwitchDbPath: string | null;
+  /** Git 变更树分组模式：directory（按目录树） / module（按顶层目录模块） */
+  gitGroupBy: "directory" | "module";
 }
 
 interface SettingsStore extends Settings {
@@ -238,6 +240,7 @@ const DEFAULTS: Settings = {
   claudeHookConfigDir: null,
   codexHookConfigDir: null,
   ccSwitchDbPath: null,
+  gitGroupBy: "directory",
 };
 
 const LEGACY_LIGHT_PALETTE_MAP: Partial<Record<string, LightThemePalette>> = {

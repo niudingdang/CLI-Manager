@@ -2,12 +2,29 @@
 
 ## [V1.1.7] - 2026-06-22
 
+### Git 变更树分组展示
+
+- **Group By Directory / Module 切换**：Git 变更面板顶部新增分组模式切换下拉（图标：Directory=文件夹树、Module=分层），支持两种分组方式：
+  - **Directory 模式**（默认）：按目录树展示变更，连续单子目录链压缩成两层显示（顶层目录独立一行，后续包路径压缩成第二行），减少深层 Java/package 路径的纵向占用。
+  - **Module 模式**：按第一级目录（视为模块）分组，每个顶层目录作为独立的模块根节点（加粗显示），模块内部继续应用 Directory 压缩逻辑。
+- **目录链压缩算法**：`collectCompactDirectoryChain()` 从当前目录的唯一子目录开始向下收集连续单子目录链，仅改变显示层级，保留原始树结构、折叠状态、文件路径与暂存操作语义。模块根节点不参与压缩，单独显示模块名。
+- **持久化**：分组模式存入 `settingsStore.gitGroupBy`，重启应用后恢复上次选择。
+- **数据层**：`gitStore` 新增 `buildTreeByModule()` 函数，按文件路径第一级目录分组构建树；`rebuildTrees()` 根据 `gitGroupBy` 设置动态选择 `buildTree()` 或 `buildTreeByModule()`。
+- **类型扩展**：`GitTreeNode` 新增 `isModuleRoot?: boolean` 标识模块根节点，`GitGroupByMode` 类型定义分组模式。
+
 ### 子代理 Hook 与转录
 
 - **Claude/Codex 子代理 Hook**：补齐 `SubagentStart` / `SubagentStop` 安装、卸载、状态检查与后端事件白名单；Hook 负载透传 `agentId`、`agentType`、Claude `agentTranscriptPath` 与 Codex `transcriptPath`，并沉淀到 CLI Hook contracts。
 - **子代理转录面板**：收到子代理启动事件后自动打开只读转录 pane，订阅 transcript jsonl，支持 `SubagentStop` 后标记结束并延迟关闭；前端路径选择按 `agentTranscriptPath ?? transcriptPath` 兜底。
 - **Codex transcript 渲染**：`SubagentTranscriptView` 支持 Codex `response_item` 中的 message / `output_text` / `function_call` 内容，并复用应用 Markdown 渲染器展示子代理输出。
 - **Hook 启动修复**：Windows 原生命令使用 PowerShell wrapper 处理含空格的 exe 路径，WSL/POSIX 保持 shell 可执行形式，避免启动时 hook 命令解析错误。
+
+### UI 修复
+
+- **修复项目列表空态横向滚动条**：项目侧边栏在空态（无项目/加载中/折叠态）时出现不必要的横向滚动条。原因是 `overflow-y: auto` 让浏览器将 `overflow-x` 隐式计算为 `auto`，空态组件宽度略微溢出即触发滚动条。给 3 处滚动容器统一添加 `overflow-x-hidden`，锁定只允许纵向滚动。
+- **终端 Tab 栏滚动增强**：Tab 数量溢出时新增左右滚动按钮与鼠标滚轮横向滚动（触控板取 deltaX、鼠标滚轮取 deltaY），并将滚动遮罩渐变由 18px 扩大到 36px，避免 Tab 标签被左/右/列表按钮遮挡。新建终端时若已滚动到最右，激活的末尾 Tab 自动吸附顶格，右滚动按钮同步禁用。
+- **修复 ccusage 安装弹框被遮挡**：开启 ccusage 统计后若未安装 bun/bunx，点击「安装 Bun/bunx」弹出的确认框被压在统计面板下方（统计面板 `z-index: 57`，而通用 `ConfirmDialog` 基座固定 `z-50`），用户无法点击确认。`ConfirmDialog` 新增可选 `zIndex` prop，`DialogContent` 同步支持 `overlayStyle` 透传到 overlay；ccusage 面板调用时传入 `zIndex={60}` 覆盖到统计面板之上，其余 5 处 `ConfirmDialog` 调用仍用默认 z-50 不受影响。
+- **ccusage 工具安装补充结果反馈**：此前点击安装后无任何提示，无法判断成败。安装成功时弹出绿色 toast 并附 Bun/bunx 版本号；命令执行成功但仍未检测到 bunx 时弹出黄色提示引导重启或检查 PATH；失败时弹出红色 toast 附错误信息。
 
 ### 终端与子代理分屏
 

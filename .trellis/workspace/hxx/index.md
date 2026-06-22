@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 11
-- **Last Active**: 2026-06-18
+- **Total Sessions**: 12
+- **Last Active**: 2026-06-22
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~379 | Active |
+| `journal-1.md` | ~412 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 12 | 2026-06-22 | Git 变更树分组展示（Group By Directory / Module） | `6998c4c` | `master` |
 | 11 | 2026-06-18 | Git 变更面板增强路线图（P1 行数 / P3 watcher / P4 高亮 / P2 暂存提交） | `f7c5f13`, `29a19bb` | `master` |
 | 10 | 2026-06-11 | Fix terminal IME candidate popup position | `9022bf7` | `fix-terminal-ime-candidate-popup-position` |
 | 9 | 2026-06-11 | Fix Chinese IME punctuation input | `308da34` | `master` |

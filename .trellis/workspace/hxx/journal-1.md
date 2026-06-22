@@ -377,3 +377,36 @@ Fixed xterm IME composition anchor fallback so candidate windows stay near the a
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: Git 变更树分组展示（Group By Directory / Module）
+
+**Date**: 2026-06-22
+**Task**: Git 变更树分组展示（Group By Directory / Module）
+**Branch**: `master`
+
+### Summary
+
+实现 JetBrains 风格的 Git 变更分组功能：Directory 模式按目录树展示并压缩连续单子目录链，Module 模式按顶层目录分组；顶部下拉菜单切换模式，状态持久化；模块根加粗显示，内部继续压缩；数据层新增 buildTreeByModule()，类型扩展 GitTreeNode.isModuleRoot
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6998c4c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
