@@ -1,6 +1,6 @@
 # Changelog
 
-## [V1.1.7] - 2026-06-20
+## [V1.1.7] - 2026-06-22
 
 ### Git 变更树分组展示
 
@@ -12,6 +12,13 @@
 - **数据层**：`gitStore` 新增 `buildTreeByModule()` 函数，按文件路径第一级目录分组构建树；`rebuildTrees()` 根据 `gitGroupBy` 设置动态选择 `buildTree()` 或 `buildTreeByModule()`。
 - **类型扩展**：`GitTreeNode` 新增 `isModuleRoot?: boolean` 标识模块根节点，`GitGroupByMode` 类型定义分组模式。
 
+### 子代理 Hook 与转录
+
+- **Claude/Codex 子代理 Hook**：补齐 `SubagentStart` / `SubagentStop` 安装、卸载、状态检查与后端事件白名单；Hook 负载透传 `agentId`、`agentType`、Claude `agentTranscriptPath` 与 Codex `transcriptPath`，并沉淀到 CLI Hook contracts。
+- **子代理转录面板**：收到子代理启动事件后自动打开只读转录 pane，订阅 transcript jsonl，支持 `SubagentStop` 后标记结束并延迟关闭；前端路径选择按 `agentTranscriptPath ?? transcriptPath` 兜底。
+- **Codex transcript 渲染**：`SubagentTranscriptView` 支持 Codex `response_item` 中的 message / `output_text` / `function_call` 内容，并复用应用 Markdown 渲染器展示子代理输出。
+- **Hook 启动修复**：Windows 原生命令使用 PowerShell wrapper 处理含空格的 exe 路径，WSL/POSIX 保持 shell 可执行形式，避免启动时 hook 命令解析错误。
+
 ### UI 修复
 
 - **修复项目列表空态横向滚动条**：项目侧边栏在空态（无项目/加载中/折叠态）时出现不必要的横向滚动条。原因是 `overflow-y: auto` 让浏览器将 `overflow-x` 隐式计算为 `auto`，空态组件宽度略微溢出即触发滚动条。给 3 处滚动容器统一添加 `overflow-x-hidden`，锁定只允许纵向滚动。
@@ -19,9 +26,21 @@
 - **修复 ccusage 安装弹框被遮挡**：开启 ccusage 统计后若未安装 bun/bunx，点击「安装 Bun/bunx」弹出的确认框被压在统计面板下方（统计面板 `z-index: 57`，而通用 `ConfirmDialog` 基座固定 `z-50`），用户无法点击确认。`ConfirmDialog` 新增可选 `zIndex` prop，`DialogContent` 同步支持 `overlayStyle` 透传到 overlay；ccusage 面板调用时传入 `zIndex={60}` 覆盖到统计面板之上，其余 5 处 `ConfirmDialog` 调用仍用默认 z-50 不受影响。
 - **ccusage 工具安装补充结果反馈**：此前点击安装后无任何提示，无法判断成败。安装成功时弹出绿色 toast 并附 Bun/bunx 版本号；命令执行成功但仍未检测到 bunx 时弹出黄色提示引导重启或检查 PATH；失败时弹出红色 toast 附错误信息。
 
-### 文档
+### 终端与子代理分屏
 
-- **重写 CLAUDE.md**：原文件为自动生成的模块索引文档，已出现漂移（声称 migrations v1-v7，实际到 v11；缺失 git/ccusage/ccswitch/claude_hook/shell_resolver/wsl 等后端模块）。新版聚焦命令使用与大图景架构，补充关键约束（前端仅 `tsc --noEmit` 一项静态校验、`npm run dev` 复用机制、调试日志开关）与非显而易见的架构设计（IPC 边界、Tab 状态双数据源合并、CLI Hook 桥接、启动时序不恢复终端原因、capability/asset scope 约定）。保留末尾 GitNexus 区块。
+- **子代理自动呈现**：子代理转录以伪会话挂入现有 pane/tree，默认自动显示但不抢主终端焦点；Tab 标题优先使用可读的 `agentType` / 昵称，缺失时回退为「子 Agent」。
+- **辅助会话入口**：分屏弹层可按当前会话/项目推断 Claude 或 Codex，并通过内置 pane 启动同类辅助会话；保留普通空终端、项目分屏和复制终端行为。
+- **终端动作栏位置**：终端动作侧栏移到终端区域最右侧，位于 Git / 实时统计侧栏之后，原有按钮、拖拽排序与弹层行为保持不变。
+
+### Git 变更与历史 Markdown
+
+- **Git 变更面板紧凑化**：筛选按钮在窄面板下隐藏文字但保留图标、计数、tooltip 与可访问标签；Git 变更面板、实时统计面板和合并侧栏默认宽度下调，减少对终端空间的占用。
+- **历史 Markdown GFM 支持**：历史消息 Markdown 渲染接入 `remark-gfm`，补齐表格、任务列表、删除线、引用、分隔线、标题、链接与代码块样式，同时继续禁用 HTML 渲染。
+
+### 其他
+
+- 修复项目列表空态横向滚动条；增强终端 Tab 栏溢出滚动按钮、鼠标滚轮横向滚动与新终端末尾吸附体验。
+- 重写项目 `CLAUDE.md`，补充当前架构、命令、调试与关键约束说明。
 
 ## [V1.1.6] - 2026-06-18
 

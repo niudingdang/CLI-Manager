@@ -5,13 +5,15 @@ import {
   Check,
   Download,
   ExternalLink,
+  FileText,
   RefreshCw,
   RotateCw,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import ReactMarkdown from "react-markdown";
 import { useTerminalStore } from "../../stores/terminalStore";
 import { useUpdateStore } from "../../stores/updateStore";
+import { MarkdownContent } from "../ui/MarkdownContent";
+import { MARKDOWN_STYLE_SAMPLE } from "../ui/markdownSample";
 
 export function AboutSection() {
   const {
@@ -124,6 +126,22 @@ export function AboutSection() {
           V{currentVersion || "---"}
         </span>
       </div>
+
+      <details className="ui-markdown-preview mt-3 rounded-xl border border-border bg-surface-container-high/40">
+        <summary className="ui-focus-ring flex cursor-pointer items-center gap-2 px-3 py-2 text-xs font-medium text-on-surface">
+          <FileText className="h-3.5 w-3.5" />
+          <span>Markdown 样式预览</span>
+        </summary>
+        <div className="border-t border-border p-3">
+          <div className="mb-2 text-[11px] font-medium text-on-surface-variant">默认样式</div>
+          <MarkdownContent content={MARKDOWN_STYLE_SAMPLE} linkBehavior="preview" />
+
+          <div className="mt-4 rounded-lg border border-[#2e2e2e] bg-[#0f0f0f] p-3">
+            <div className="mb-2 text-[11px] font-medium text-[#9ca0a6]">Terminal 样式</div>
+            <MarkdownContent content={MARKDOWN_STYLE_SAMPLE} variant="terminal" />
+          </div>
+        </div>
+      </details>
 
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button
@@ -262,9 +280,7 @@ export function AboutSection() {
           {updateInfo.releaseNotes && (
             <div className="mt-3 border-t border-border/50 pt-3">
               <div className="mb-1 text-xs font-medium text-on-surface-variant">更新说明</div>
-              <div className="prose prose-sm prose-invert max-w-none text-xs text-on-surface-variant [&_h1]:text-sm [&_h1]:font-semibold [&_h2]:text-xs [&_h2]:font-semibold [&_h3]:text-xs [&_h3]:font-medium [&_h4]:text-xs [&_h4]:font-medium [&_h5]:text-xs [&_h6]:text-xs [&_li]:my-0.5 [&_p]:my-1 [&_ul]:my-1">
-                <ReactMarkdown>{updateInfo.releaseNotes}</ReactMarkdown>
-              </div>
+              <MarkdownContent content={updateInfo.releaseNotes} linkBehavior="open" />
             </div>
           )}
 
