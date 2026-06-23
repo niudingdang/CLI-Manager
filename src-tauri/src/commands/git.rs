@@ -14,11 +14,16 @@ fn open_git_repo<P: AsRef<Path>>(path: P) -> Result<Repository, String> {
     let path = path.as_ref();
     match Repository::open(path) {
         Ok(repo) => return Ok(repo),
-        Err(_e) => {
+        Err(first_err) => {
             let path_str = path.to_string_lossy();
             if !crate::wsl::is_wsl_config_dir(&path_str) {
-                return Err(format!("打开 Git 仓库失败: {_e}"));
+                return Err(format!("打开 Git 仓库失败: {first_err}"));
             }
+            log::info!(
+                "[git:wsl] 检测到 WSL UNC 路径, 首次打开失败(Owner -36 预期): path={} error={first_err}",
+                path_str
+            );
+            log::info!("[git:wsl] 临时关闭 libgit2 所有权验证后重试");
         }
     }
 
@@ -34,6 +39,11 @@ fn open_git_repo<P: AsRef<Path>>(path: P) -> Result<Repository, String> {
     };
     // 立即恢复所有权验证
     let _ = unsafe { git2::opts::set_verify_owner_validation(true) };
+
+    match &result {
+        Ok(_) => log::info!("[git:wsl] 关闭所有权验证后 Git 仓库打开成功: path={}", path.to_string_lossy()),
+        Err(e) => log::warn!("[git:wsl] 关闭所有权验证后仍失败: path={} error={e}", path.to_string_lossy()),
+    }
     result
 }
 
