@@ -1,7 +1,7 @@
 {
-  "id": "codex-force-scrollbar",
-  "name": "codex-force-scrollbar",
-  "title": "强制 Codex 终端显示滚动条",
+  "id": "xterm",
+  "name": "xterm",
+  "title": "添加 xterm 普通链接识别",
   "description": "",
   "status": "in_progress",
   "dev_type": null,
