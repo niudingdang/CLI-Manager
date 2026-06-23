@@ -5,6 +5,38 @@ use tauri::{AppHandle, State};
 
 use crate::git_watcher::GitWatcherBridge;
 
+/// 打开 Git 仓库的统一入口，兼容 WSL UNC 路径。
+///
+/// libgit2 在 Windows 上会校验仓库路径所有权，WSL UNC 路径（`\\wsl.localhost\...`）
+/// 通过 Plan 9 协议暴露，所有权信息无法正确传递，导致 `Repository::open` 失败。
+/// 本函数检测到 WSL UNC 路径时，临时关闭所有权验证后重试。
+fn open_git_repo<P: AsRef<Path>>(path: P) -> Result<Repository, String> {
+    let path = path.as_ref();
+    match Repository::open(path) {
+        Ok(repo) => return Ok(repo),
+        Err(_e) => {
+            let path_str = path.to_string_lossy();
+            if !crate::wsl::is_wsl_config_dir(&path_str) {
+                return Err(format!("打开 Git 仓库失败: {_e}"));
+            }
+        }
+    }
+
+    // WSL UNC 路径：关闭所有权验证后重试。
+    // SAFETY: WSL 路径是本机文件系统，所有权检查因 Plan 9 协议限制误报，
+    // 关闭检查不引入安全风险。
+    let result = unsafe {
+        git2::opts::set_verify_owner_validation(false)
+            .map_err(|e| format!("设置 git2 选项失败: {e}"))
+            .and_then(|_| {
+                Repository::open(path).map_err(|e| format!("打开 WSL Git 仓库失败: {e}"))
+            })
+    };
+    // 立即恢复所有权验证
+    let _ = unsafe { git2::opts::set_verify_owner_validation(true) };
+    result
+}
+
 /// 查询指定路径的当前 git 分支
 ///
 /// 使用 libgit2 库直接查询仓库状态，避免文件 I/O 触发安全软件弹窗。
@@ -23,7 +55,7 @@ pub async fn get_current_git_branch(path: String) -> Result<Option<String>, Stri
 
     tokio::task::spawn_blocking(move || {
         // 尝试打开 git 仓库
-        let repo = match Repository::open(&path) {
+        let repo = match open_git_repo(&path) {
             Ok(r) => r,
             Err(_) => return Ok(None), // 非 git 仓库或无权限
         };
@@ -75,7 +107,7 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
         log::info!("[git_get_changes] 路径存在，尝试打开 Git 仓库");
 
         // 打开 git 仓库
-        let repo = Repository::open(path)
+        let repo = open_git_repo(path)
             .map_err(|e| {
                 let err_msg = format!("不是 Git 仓库或无法访问: {}", e);
                 log::error!("[git_get_changes] {}", err_msg);
@@ -262,7 +294,7 @@ pub async fn git_get_file_diff(
             return Err(format!("路径不存在: {}", project_path));
         }
 
-        let repo = Repository::open(path).map_err(|e| format!("打开仓库失败: {}", e))?;
+        let repo = open_git_repo(path).map_err(|e| format!("打开仓库失败: {}", e))?;
 
         // 针对不同状态使用不同策略
         match status.as_str() {
@@ -417,7 +449,7 @@ pub async fn git_discard_file(
             return Err("path_not_found".to_string());
         }
 
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
         match status.as_str() {
             "U" | "??" => Err("untracked_not_supported".to_string()),
@@ -569,7 +601,7 @@ fn apply_patch_to_workdir(project_path: &str, reverse_patch: &str) -> Result<(),
     if !path.exists() {
         return Err("path_not_found".to_string());
     }
-    let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+    let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
     let diff = git2::Diff::from_buffer(reverse_patch.as_bytes())
         .map_err(|e| format!("parse_patch_failed: {e}"))?;
@@ -793,7 +825,7 @@ pub async fn git_stage_file(project_path: String, file_path: String) -> Result<(
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         let rel = Path::new(&file_path);
         if path.join(&file_path).exists() {
@@ -819,7 +851,7 @@ pub async fn git_unstage_file(project_path: String, file_path: String) -> Result
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         match repo.head().and_then(|h| h.peel_to_commit()) {
             Ok(commit) => {
                 repo.reset_default(Some(commit.as_object()), [file_path.as_str()])
@@ -848,7 +880,7 @@ pub async fn git_stage_all(project_path: String) -> Result<(), String> {
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         index
             .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
@@ -871,7 +903,7 @@ pub async fn git_unstage_all(project_path: String) -> Result<(), String> {
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         match repo.head().and_then(|h| h.peel_to_tree()) {
             Ok(tree) => {
@@ -901,7 +933,7 @@ pub async fn git_stage_paths(project_path: String, paths: Vec<String>) -> Result
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         for p in &paths {
             let rel = Path::new(p);
@@ -931,7 +963,7 @@ pub async fn git_unstage_paths(project_path: String, paths: Vec<String>) -> Resu
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         match repo.head().and_then(|h| h.peel_to_commit()) {
             Ok(commit) => {
                 repo.reset_default(Some(commit.as_object()), paths.iter().map(|s| s.as_str()))
@@ -965,7 +997,7 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         let tree_oid = index
@@ -1081,7 +1113,7 @@ pub async fn git_branch_status(project_path: String) -> Result<GitBranchStatus, 
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
         // 进行中的合并/变基（git2 仓库状态）。变基期间 HEAD 通常 detached，
         // 需在 detached 早返回前计算，避免漏报。
@@ -1341,7 +1373,7 @@ pub async fn git_pull_abort(project_path: String) -> Result<String, String> {
             return Err("path_not_found".to_string());
         }
         let rebasing = {
-            let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+            let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
             matches!(
                 repo.state(),
                 git2::RepositoryState::Rebase

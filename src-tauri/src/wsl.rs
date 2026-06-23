@@ -32,6 +32,45 @@ pub fn is_wsl_config_dir(path: &str) -> bool {
     normalized.starts_with("\\\\wsl.localhost\\") || normalized.starts_with("\\\\wsl$\\")
 }
 
+/// 解析 WSL UNC 路径为 `(distro, linux_path)`。
+/// `\\wsl.localhost\Ubuntu\home\venti\.claude` → `Some(("Ubuntu", "/home/venti/.claude"))`
+pub fn parse_wsl_unc_path(path: &str) -> Option<(String, String)> {
+    let normalized = path.trim().replace('/', "\\");
+    if !is_wsl_config_dir(&normalized) {
+        return None;
+    }
+
+    // 剥离前缀，得到 `<distro>\<rest>`
+    let after_prefix = if normalized.to_ascii_lowercase().starts_with("\\\\wsl.localhost\\") {
+        &normalized["\\\\wsl.localhost\\".len()..]
+    } else {
+        &normalized["\\\\wsl$\\".len()..]
+    };
+
+    let (distro, tail) = after_prefix.split_once('\\')?;
+    if distro.is_empty() {
+        return None;
+    }
+    let distro = distro.to_string();
+    let linux_path = format!("/{}", tail.replace('\\', "/"));
+    Some((distro, linux_path))
+}
+
+/// 将 WSL Linux 路径转回 UNC 形式。
+/// `("/home/venti/.claude", "Ubuntu")` → `\\wsl.localhost\Ubuntu\home\venti\.claude`
+pub fn linux_to_unc_wsl_path(linux_path: &str, distro: &str) -> String {
+    let tail = linux_path.trim().trim_start_matches('/').replace('/', "\\");
+    format!("\\\\wsl.localhost\\{distro}\\{tail}")
+}
+
+/// 定位 `wsl.exe`，通常位于 `%SystemRoot%\System32\wsl.exe`。
+pub fn find_wsl_exe() -> Option<std::path::PathBuf> {
+    std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join("System32").join("wsl.exe"))
+        .filter(|candidate| candidate.exists())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +105,42 @@ mod tests {
         assert!(is_wsl_config_dir(r"\\WSL.LOCALHOST\Ubuntu\home")); // 大小写不敏感
         assert!(!is_wsl_config_dir(r"C:\Users\me\.claude"));
         assert!(!is_wsl_config_dir(r"\\server\share\.claude")); // 普通 UNC 不算
+    }
+
+    #[test]
+    fn parse_wsl_unc_extracts_distro_and_linux_path() {
+        let result = parse_wsl_unc_path(r"\\wsl.localhost\Ubuntu\home\venti\.claude");
+        assert!(result.is_some());
+        let (distro, linux) = result.unwrap();
+        assert_eq!(distro, "Ubuntu");
+        assert_eq!(linux, "/home/venti/.claude");
+    }
+
+    #[test]
+    fn parse_wsl_unc_handles_wsl_dollar() {
+        let result = parse_wsl_unc_path(r"\\wsl$\Debian\root\projects");
+        assert!(result.is_some());
+        let (distro, linux) = result.unwrap();
+        assert_eq!(distro, "Debian");
+        assert_eq!(linux, "/root/projects");
+    }
+
+    #[test]
+    fn parse_wsl_unc_rejects_non_wsl_unc() {
+        assert!(parse_wsl_unc_path(r"C:\Users\me\.claude").is_none());
+        assert!(parse_wsl_unc_path(r"\\server\share\path").is_none());
+    }
+
+    #[test]
+    fn linux_to_unc_roundtrip() {
+        let linux = "/home/venti/.claude/projects";
+        let unc = linux_to_unc_wsl_path(linux, "Ubuntu");
+        assert_eq!(unc, "\\\\wsl.localhost\\Ubuntu\\home\\venti\\.claude\\projects");
+    }
+
+    #[test]
+    fn linux_to_unc_handles_trailing_slash() {
+        let unc = linux_to_unc_wsl_path("/home/venti/", "Ubuntu");
+        assert_eq!(unc, "\\\\wsl.localhost\\Ubuntu\\home\\venti\\");
     }
 }

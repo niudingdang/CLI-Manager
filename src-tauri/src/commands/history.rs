@@ -1,4 +1,5 @@
 use crate::commands::model_pricing::{find_cached_model_pricing, CachedModelPricingLookup};
+use crate::shell_resolver::silent_command;
 use log::debug;
 use memchr::memmem;
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -118,7 +120,7 @@ struct CachedSessionProjectCacheEntry {
     scan: SessionProjectScan,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct SessionFileFingerprint {
     created_at: i64,
     updated_at: i64,
@@ -1991,6 +1993,13 @@ fn can_reuse_session_scan(
 }
 
 fn session_file_fingerprint(path: &Path) -> SessionFileFingerprint {
+    let path_str = path.to_string_lossy();
+    if crate::wsl::is_wsl_config_dir(&path_str) {
+        if let Some((distro, linux_path)) = crate::wsl::parse_wsl_unc_path(&path_str) {
+            return wsl_session_fingerprint(&linux_path, &distro);
+        }
+    }
+
     let metadata = fs::metadata(path).ok();
     let updated_at = metadata
         .as_ref()
@@ -2269,7 +2278,167 @@ fn scan_session_files(source_filter: Option<&str>, roots: &HistoryRoots) -> Vec<
     files
 }
 
+// ── WSL 路径感知的会话文件扫描 ───────────────────────────────────────────────
+// 当 history root 指向 WSL UNC 路径（\\wsl.localhost\...）时，fs::read_dir 等
+// Windows 原生文件 API 在 Plan 9 协议上不可靠。此时改用 wsl.exe 命令在 WSL 内部
+// 完成目录枚举与元数据读取，绕过文件系统限制。
+
+fn wsl_command_output(program: &str, args: &[&str]) -> Result<Output, String> {
+    let mut cmd = silent_command(program);
+    cmd.args(args);
+    cmd.output()
+        .map_err(|err| format!("wsl command failed: {err}"))
+}
+
+/// 通过 `wsl.exe find` 在 WSL 内递归列出 JSONL 会话文件，
+/// 返回 `(linux_path, project_key)`。
+fn wsl_find_session_files(
+    linux_dir: &str,
+    distro: &str,
+    name_pattern: &str,
+    project_key_from_path: &dyn Fn(&str) -> String,
+) -> Vec<(String, String)> {
+    let wsl_exe = crate::wsl::find_wsl_exe();
+    let wsl_exe_str = wsl_exe
+        .as_deref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "wsl.exe".to_string());
+
+    let args = [
+        "-d", distro,
+        "find", linux_dir,
+        "-name", name_pattern,
+        "-type", "f",
+    ];
+    let output = match wsl_command_output(&wsl_exe_str, &args) {
+        Ok(out) => out,
+        Err(_err) => {
+            debug!("wsl_find_session_files: wsl find failed for {linux_dir}: {_err}");
+            return Vec::new();
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && line.ends_with(".jsonl"))
+        .map(|linux_path| {
+            let key = project_key_from_path(linux_path);
+            (linux_path.to_string(), key)
+        })
+        .collect()
+}
+
+/// 通过 `wsl.exe stat` 获取文件元数据（size / mtime / ctime）。
+fn wsl_session_fingerprint(linux_path: &str, distro: &str) -> SessionFileFingerprint {
+    let wsl_exe = crate::wsl::find_wsl_exe();
+    let wsl_exe_str = wsl_exe
+        .as_deref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "wsl.exe".to_string());
+
+    let args = ["-d", distro, "stat", "-c", "%s %Y %W", linux_path];
+    let output = match wsl_command_output(&wsl_exe_str, &args) {
+        Ok(out) => out,
+        Err(_) => return SessionFileFingerprint::default(),
+    };
+    if !output.status.success() {
+        return SessionFileFingerprint::default();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    if parts.len() < 3 {
+        return SessionFileFingerprint::default();
+    }
+
+    let size: u64 = parts[0].parse().unwrap_or(0);
+    let mtime: i64 = parts[1].parse().unwrap_or(0);
+    let ctime: i64 = parts[2].parse().unwrap_or(0);
+    // stat %W 在部分文件系统返回 0（birth time 不支持），回退到 ctime/mtime
+    let created_at = if ctime > 0 { ctime * 1000 } else { mtime * 1000 };
+
+    SessionFileFingerprint {
+        created_at,
+        updated_at: (mtime * 1000).max(created_at),
+        size,
+    }
+}
+
+/// Claude: 从 Linux 路径提取 project_key（projects 目录下的第一级子目录名）。
+fn claude_project_key_from_wsl_linux_path(linux_path: &str) -> String {
+    let normalized = linux_path.trim_end_matches('/').replace('\\', "/");
+    // 路径格式: /home/user/.claude/projects/<project_key>/<session>.jsonl
+    // 找 "projects/" 之后的第一段
+    if let Some(after_projects) = normalized.split("/projects/").nth(1) {
+        if let Some(key) = after_projects.split('/').next() {
+            if !key.is_empty() {
+                return key.to_string();
+            }
+        }
+    }
+    // 回退：取父目录名
+    std::path::Path::new(&normalized)
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+/// Codex: 从 Linux 路径提取 project_key（sessions 目录下的相对路径）。
+fn codex_project_key_from_wsl_linux_path(linux_path: &str, linux_root: &str) -> String {
+    let normalized = linux_path.trim_end_matches('/').replace('\\', "/");
+    let root_normalized = linux_root.trim_end_matches('/').replace('\\', "/");
+    // sessions/<project_key>/ 或 sessions/<project_key>/<sub>/rollout-xxx.jsonl
+    if let Some(tail) = normalized.strip_prefix(&format!("{root_normalized}/", )) {
+        if let Some(rel) = tail.split('/').next() {
+            if !rel.is_empty() {
+                return rel.to_string();
+            }
+        }
+    }
+    "sessions".to_string()
+}
+
+fn collect_wsl_claude_session_files(linux_projects_dir: &str, distro: &str) -> Vec<SessionFileRef> {
+    let results = wsl_find_session_files(linux_projects_dir, distro, "*.jsonl", &|linux_path| {
+        claude_project_key_from_wsl_linux_path(linux_path)
+    });
+
+    results
+        .into_iter()
+        .map(|(linux_path, project_key)| SessionFileRef {
+            source: "claude".to_string(),
+            project_key,
+            path: PathBuf::from(crate::wsl::linux_to_unc_wsl_path(&linux_path, distro)),
+        })
+        .collect()
+}
+
+fn collect_wsl_codex_session_files(linux_sessions_dir: &str, distro: &str) -> Vec<SessionFileRef> {
+    let results = wsl_find_session_files(linux_sessions_dir, distro, "rollout-*.jsonl", &|linux_path| {
+        codex_project_key_from_wsl_linux_path(linux_path, linux_sessions_dir)
+    });
+
+    results
+        .into_iter()
+        .map(|(linux_path, project_key)| SessionFileRef {
+            source: "codex".to_string(),
+            project_key,
+            path: PathBuf::from(crate::wsl::linux_to_unc_wsl_path(&linux_path, distro)),
+        })
+        .collect()
+}
+
 fn collect_claude_session_files(root: &Path) -> Vec<SessionFileRef> {
+    let root_str = root.to_string_lossy();
+    if crate::wsl::is_wsl_config_dir(&root_str) {
+        if let Some((distro, linux_path)) = crate::wsl::parse_wsl_unc_path(&root_str) {
+            return collect_wsl_claude_session_files(&linux_path, &distro);
+        }
+    }
+
     if !root.exists() {
         return Vec::new();
     }
@@ -2301,6 +2470,13 @@ fn collect_claude_session_files(root: &Path) -> Vec<SessionFileRef> {
 }
 
 fn collect_codex_session_files(root: &Path) -> Vec<SessionFileRef> {
+    let root_str = root.to_string_lossy();
+    if crate::wsl::is_wsl_config_dir(&root_str) {
+        if let Some((distro, linux_path)) = crate::wsl::parse_wsl_unc_path(&root_str) {
+            return collect_wsl_codex_session_files(&linux_path, &distro);
+        }
+    }
+
     if !root.exists() {
         return Vec::new();
     }
@@ -2416,6 +2592,9 @@ fn session_matches_project_path(file_ref: &SessionFileRef, target_project_path: 
     // (/mnt/d/..) 编码会话目录，故同时尝试 Windows 与 WSL 两种形式——二者指向同一物理
     // 目录，任一命中即视为同项目。target_project_path 已被 normalize_history_path 归一化。
     let wsl_target = crate::wsl::windows_path_to_wsl(target_project_path);
+    // WSL UNC 路径（\\wsl.localhost\...）也需要转成 Linux 形式做 project_key 匹配。
+    let wsl_unc_linux_target = crate::wsl::parse_wsl_unc_path(target_project_path)
+        .map(|(_distro, linux_path)| linux_path);
 
     if file_ref.source == "claude" {
         let key = file_ref.project_key.to_lowercase();
@@ -2424,6 +2603,11 @@ fn session_matches_project_path(file_ref: &SessionFileRef, target_project_path: 
         }
         if let Some(wsl_target) = wsl_target.as_deref() {
             if key == claude_project_key_from_path(wsl_target) {
+                return true;
+            }
+        }
+        if let Some(ref linux_target) = wsl_unc_linux_target {
+            if key == claude_project_key_from_path(linux_target) {
                 return true;
             }
         }
@@ -2436,6 +2620,9 @@ fn session_matches_project_path(file_ref: &SessionFileRef, target_project_path: 
         .map(|cwd| {
             cwd_matches_target(&cwd, target_project_path)
                 || wsl_target
+                    .as_deref()
+                    .is_some_and(|target| cwd_matches_target(&cwd, target))
+                || wsl_unc_linux_target
                     .as_deref()
                     .is_some_and(|target| cwd_matches_target(&cwd, target))
         })
