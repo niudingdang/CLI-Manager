@@ -6,6 +6,7 @@
 
 - **系统级 Hook 通知**：Claude Code / Codex CLI Hook 事件新增操作系统原生通知，支持按事件类型分别控制；任务完成、失败、审批请求与提醒默认开启，会话启动和命令提交默认关闭。
 - **跨平台通知桥接**：Windows/macOS/Linux 默认走 Tauri 系统通知能力；WSL 场景保留 Windows Toast fallback，并在通知正文中加入 emoji 与项目状态语义，系统通知失败不影响应用内弹框和标签状态。
+- **Hook 设置页优化**：将系统通知事件开关整合到 HookCard 卡片上，移除冗余的系统通知事件列表，每个卡片底部增加铃铛按钮独立控制对应事件的系统通知（灰色铃铛=关闭，蓝色=开启）；Claude 事件从 4 组合卡片展开为 6 独立卡片（会话启动、运行中、待审批、任务完成、执行失败、子 Agent），Codex 事件同步展开；卡片图标统一更新为更语义化的 Lucide 图标（Activity=运行中、Bell=待审批、ShieldAlert=需要审批、XCircle=执行失败、Layers=子 Agent、ToggleRight=Hooks 功能）；修复 Hook 通知弹框位置从 `top-left` 改为 `top-right` 并增加宽屏避让右侧面板逻辑。
 
 ### 历史会话过程视图
 
