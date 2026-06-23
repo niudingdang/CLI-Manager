@@ -12,6 +12,7 @@ import { Input } from "./ui/input";
 import { toast } from "sonner";
 import { logError } from "../lib/logger";
 import { openWindowsTerminal } from "../lib/externalTerminal";
+import { resolveProjectStartupCommand } from "../lib/projectStartupCommand";
 
 export const useCommandPaletteStore = create<{
   isOpen: boolean;
@@ -150,7 +151,7 @@ export function CommandPalette() {
         description: p.path,
         category: "项目",
         action: () => {
-          const cmd = p.startup_cmd || p.cli_tool || undefined;
+          const cmd = resolveProjectStartupCommand(p);
           const shell = p.shell && p.shell !== "powershell" ? p.shell : undefined;
           if (viewMode === "compact") {
             void openWindowsTerminal([{

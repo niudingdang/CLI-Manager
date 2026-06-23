@@ -40,6 +40,7 @@ import {
 } from "./terminal/TerminalSidePanel";
 import { SubagentTranscriptView } from "./terminal/SubagentTranscriptView";
 import { openWindowsTerminal } from "../lib/externalTerminal";
+import { resolveProjectStartupCommand } from "../lib/projectStartupCommand";
 import { Terminal, Plus, ListClockIcon, X, Maximize2, Minimize2, ChevronDown, ChevronRight, BarChart3, GitBranch, Folder } from "./icons";
 import { VendorIcon, inferVendor, type VendorKey } from "./VendorIcon";
 import { EmptyState } from "./ui/EmptyState";
@@ -190,7 +191,7 @@ function parseProjectEnvVars(project?: Project): Record<string, string> | undefi
 }
 
 function buildProjectSplitOptions(project: Project): SplitTerminalOptions {
-  const cmd = project.startup_cmd || project.cli_tool || undefined;
+  const cmd = resolveProjectStartupCommand(project);
   const shell = project.shell && project.shell !== "powershell" ? project.shell : undefined;
 
   return {
