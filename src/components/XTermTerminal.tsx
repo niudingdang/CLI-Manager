@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { ImageAddon } from "@xterm/addon-image";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { SerializeAddon } from "@xterm/addon-serialize";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -21,6 +25,9 @@ const MIN_TERMINAL_COLS = 40;
 const MIN_TERMINAL_ROWS = 8;
 const ACTIVE_WRITE_FRAME_BUDGET = 64 * 1024;
 const SEARCH_HIGHLIGHT_LIMIT = 1000;
+const IMAGE_ADDON_PIXEL_LIMIT = 4 * 1024 * 1024;
+const IMAGE_ADDON_SEQUENCE_LIMIT = 8 * 1024 * 1024;
+const IMAGE_ADDON_STORAGE_LIMIT_MB = 32;
 // Box-drawing glyphs used by TUI input boxes (Claude Code / Codex draw "│ > … │").
 const TUI_BORDER_CHAR_PATTERN = /^[│┃║▏▎▍▌▋▊▉█┆┊╎╏]$/u;
 const TUI_BORDER_PREFIX_PATTERN = /^[\s│┃║▏▎▍▌▋▊▉█┆┊╎╏]+/u;
@@ -110,6 +117,27 @@ const copyTextToClipboard = async (text: string) => {
       document.body.removeChild(textarea);
     }
   }
+};
+
+const openHttpUrl = (sessionId: string, uri: string) => {
+  if (!/^https?:\/\//i.test(uri)) return;
+  void openUrl(uri).catch((err) => logError("Failed to open terminal link", { sessionId, uri, err }));
+};
+
+const serializeBufferPlainText = (terminal: Terminal) => {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let row = 0; row < buffer.length; row += 1) {
+    const line = buffer.getLine(row);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += text;
+    } else {
+      lines.push(text);
+    }
+  }
+  return lines.join("\n").replace(/[\s\n]+$/u, "");
 };
 
 interface TerminalContextMenuPoint {
@@ -488,18 +516,29 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
       // webview 里会被拦成"是否导航"确认框。接管为系统默认浏览器打开，仅放行
       // http/https，避免恶意 scheme。
       linkHandler: {
-        activate: (_event, uri) => {
-          if (/^https?:\/\//i.test(uri)) {
-            void openUrl(uri).catch((err) => logError("Failed to open terminal link", { sessionId, uri, err }));
-          }
-        },
+        activate: (_event, uri) => openHttpUrl(sessionId, uri),
       },
     });
 
     const fitAddon = new FitAddon();
+    const imageAddon = new ImageAddon({
+      enableSizeReports: false,
+      pixelLimit: IMAGE_ADDON_PIXEL_LIMIT,
+      storageLimit: IMAGE_ADDON_STORAGE_LIMIT_MB,
+      sixelSizeLimit: IMAGE_ADDON_SEQUENCE_LIMIT,
+      iipSizeLimit: IMAGE_ADDON_SEQUENCE_LIMIT,
+    });
     const searchAddon = new SearchAddon({ highlightLimit: SEARCH_HIGHLIGHT_LIMIT });
+    const serializeAddon = new SerializeAddon();
+    const unicode11Addon = new Unicode11Addon();
+    const webLinksAddon = new WebLinksAddon((_event, uri) => openHttpUrl(sessionId, uri));
     terminal.loadAddon(fitAddon);
+    terminal.loadAddon(imageAddon);
     terminal.loadAddon(searchAddon);
+    terminal.loadAddon(serializeAddon);
+    terminal.loadAddon(unicode11Addon);
+    terminal.unicode.activeVersion = "11";
+    terminal.loadAddon(webLinksAddon);
     terminal.open(containerRef.current);
     const searchResultDisposable = searchAddon.onDidChangeResults((event) => {
       setSearchResult({ resultIndex: event.resultIndex, resultCount: event.resultCount });
@@ -1269,6 +1308,14 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     terminal.focus();
   };
 
+  const handleMenuCopyAll = () => {
+    const terminal = terminalRef.current;
+    closeContextMenu();
+    if (!terminal) return;
+    void copyTextToClipboard(serializeBufferPlainText(terminal));
+    terminal.focus();
+  };
+
   const runMenuAction = (action?: () => void) => {
     closeContextMenu();
     action?.();
@@ -1452,6 +1499,14 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
               onClick={handleMenuSelectAll}
             >
               <span>全选</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="terminal-context-menu-item"
+              onClick={handleMenuCopyAll}
+            >
+              <span>复制全部输出</span>
             </button>
             {hasManageActions && (
               <>

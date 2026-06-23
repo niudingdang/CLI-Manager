@@ -10,6 +10,7 @@ import { ConfigModal } from "../ConfigModal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ProviderSwitchModal } from "../ProviderSwitchModal";
 import { openWindowsTerminal } from "../../lib/externalTerminal";
+import { resolveProjectStartupCommand } from "../../lib/projectStartupCommand";
 import { TreeContext, type TreeActions } from "./TreeContext";
 import { Portal } from "../ui/Portal";
 import { toast } from "sonner";
@@ -71,7 +72,7 @@ function buildProjectSplitOptions(project: Project): SplitTerminalOptions {
     projectId: project.id,
     cwd: project.path,
     title,
-    startupCmd: project.startup_cmd || project.cli_tool || undefined,
+    startupCmd: resolveProjectStartupCommand(project),
     envVars,
     shell: project.shell && project.shell !== "powershell" ? project.shell : undefined,
   };
@@ -555,7 +556,7 @@ export function Sidebar({ onOpenSettings, onOpenStats, compactMode = false }: Si
       items.map((project) => ({
         cwd: project.path,
         title: project.cli_tool ? `${project.name} (${project.cli_tool})` : project.name,
-        startupCmd: project.startup_cmd || project.cli_tool || undefined,
+        startupCmd: resolveProjectStartupCommand(project),
         shell: project.shell || undefined,
       }))
     );

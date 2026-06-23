@@ -5,6 +5,48 @@ use tauri::{AppHandle, State};
 
 use crate::git_watcher::GitWatcherBridge;
 
+/// 打开 Git 仓库的统一入口，兼容 WSL UNC 路径。
+///
+/// libgit2 在 Windows 上会校验仓库路径所有权，WSL UNC 路径（`\\wsl.localhost\...`）
+/// 通过 Plan 9 协议暴露，所有权信息无法正确传递，导致 `Repository::open` 失败。
+/// 本函数检测到 WSL UNC 路径时，临时关闭所有权验证后重试。
+fn open_git_repo<P: AsRef<Path>>(path: P) -> Result<Repository, String> {
+    let path = path.as_ref();
+    match Repository::open(path) {
+        Ok(repo) => return Ok(repo),
+        Err(first_err) => {
+            let path_str = path.to_string_lossy();
+            if !crate::wsl::is_wsl_config_dir(&path_str) {
+                return Err(format!("打开 Git 仓库失败: {first_err}"));
+            }
+            log::info!(
+                "[git:wsl] 检测到 WSL UNC 路径, 首次打开失败(Owner -36 预期): path={} error={first_err}",
+                path_str
+            );
+            log::info!("[git:wsl] 临时关闭 libgit2 所有权验证后重试");
+        }
+    }
+
+    // WSL UNC 路径：关闭所有权验证后重试。
+    // SAFETY: WSL 路径是本机文件系统，所有权检查因 Plan 9 协议限制误报，
+    // 关闭检查不引入安全风险。
+    let result = unsafe {
+        git2::opts::set_verify_owner_validation(false)
+            .map_err(|e| format!("设置 git2 选项失败: {e}"))
+            .and_then(|_| {
+                Repository::open(path).map_err(|e| format!("打开 WSL Git 仓库失败: {e}"))
+            })
+    };
+    // 立即恢复所有权验证
+    let _ = unsafe { git2::opts::set_verify_owner_validation(true) };
+
+    match &result {
+        Ok(_) => log::info!("[git:wsl] 关闭所有权验证后 Git 仓库打开成功: path={}", path.to_string_lossy()),
+        Err(e) => log::warn!("[git:wsl] 关闭所有权验证后仍失败: path={} error={e}", path.to_string_lossy()),
+    }
+    result
+}
+
 /// 查询指定路径的当前 git 分支
 ///
 /// 使用 libgit2 库直接查询仓库状态，避免文件 I/O 触发安全软件弹窗。
@@ -78,7 +120,7 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
         log::info!("[git_get_changes] 路径存在，尝试打开 Git 仓库");
 
         // 打开 git 仓库
-        let repo = Repository::open(path).map_err(|e| {
+        let repo = open_git_repo(path).map_err(|e| {
             let err_msg = format!("不是 Git 仓库或无法访问: {}", e);
             log::error!("[git_get_changes] {}", err_msg);
             err_msg
