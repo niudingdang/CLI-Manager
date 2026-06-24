@@ -29,15 +29,68 @@ fn try_notify(source: &str, event: &str) -> Option<()> {
     let _ = std::io::stdin().read_to_string(&mut stdin_raw);
     let hook_input: Value = serde_json::from_str(stdin_raw.trim()).unwrap_or(Value::Null);
 
-    let message = first_string(&hook_input, &["message", "prompt", "notification", "reason"]);
+    let tool_input = hook_input.get("tool_input");
+    let tool_response = hook_input
+        .get("tool_response")
+        .or_else(|| hook_input.get("tool_result"));
+    let message = first_string(
+        &hook_input,
+        &["message", "prompt", "notification", "reason"],
+    )
+    .or_else(|| {
+        tool_input.and_then(|value| first_string(value, &["prompt", "description", "task"]))
+    });
     let session_id = hook_input
         .get("session_id")
         .and_then(Value::as_str)
         .map(str::to_string);
     // 子 Agent 事件（SubagentStart 等）字段；hook stdin 为 snake_case。
-    let agent_id = first_string(&hook_input, &["agent_id"]);
-    let agent_type = first_string(&hook_input, &["agent_type"]);
-    let agent_transcript_path = first_string(&hook_input, &["agent_transcript_path"]);
+    let agent_id = first_string(&hook_input, &["agent_id"])
+        .or_else(|| tool_input.and_then(|value| first_string(value, &["agent_id", "agentId"])))
+        .or_else(|| tool_response.and_then(|value| first_string(value, &["agent_id", "agentId"])));
+    let tool_use_id = first_string(&hook_input, &["tool_use_id", "toolUseId", "tool_id", "id"])
+        .or_else(|| {
+            tool_input.and_then(|value| first_string(value, &["tool_use_id", "toolUseId", "id"]))
+        });
+    let agent_type = first_string(&hook_input, &["agent_type"])
+        .or_else(|| {
+            tool_input.and_then(|value| {
+                first_string(
+                    value,
+                    &["agent_type", "agentType", "subagent_type", "subagentType"],
+                )
+            })
+        })
+        .or_else(|| {
+            tool_response.and_then(|value| {
+                first_string(
+                    value,
+                    &["agent_type", "agentType", "subagent_type", "subagentType"],
+                )
+            })
+        });
+    let agent_transcript_path = first_string(&hook_input, &["agent_transcript_path"])
+        .or_else(|| {
+            tool_input.and_then(|value| {
+                first_string(value, &["agent_transcript_path", "agentTranscriptPath"])
+            })
+        })
+        .or_else(|| {
+            tool_response.and_then(|value| {
+                first_string(value, &["agent_transcript_path", "agentTranscriptPath"])
+            })
+        })
+        .or_else(|| {
+            deep_first_string(
+                &hook_input,
+                &[
+                    "agent_transcript_path",
+                    "agentTranscriptPath",
+                    "child_transcript_path",
+                    "childTranscriptPath",
+                ],
+            )
+        });
     let transcript_path = first_string(&hook_input, &["transcript_path"]);
     let cwd = env::current_dir()
         .ok()
@@ -54,6 +107,7 @@ fn try_notify(source: &str, event: &str) -> Option<()> {
         "cwd": cwd,
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "agentId": agent_id,
+        "toolUseId": tool_use_id,
         "agentType": agent_type,
         "agentTranscriptPath": agent_transcript_path,
         "transcriptPath": transcript_path,
@@ -97,6 +151,25 @@ fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
         .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_string))
 }
 
+fn deep_first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(found) = keys
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str).map(str::to_string))
+            {
+                return Some(found);
+            }
+            map.values()
+                .find_map(|child| deep_first_string(child, keys))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|child| deep_first_string(child, keys)),
+        _ => None,
+    }
+}
+
 /// 与旧 PowerShell 脚本保持一致的标题文案；前端在缺省时会自行兜底（App.tsx）。
 fn title_for(source: &str, event: &str) -> &'static str {
     match (source, event) {
@@ -112,6 +185,8 @@ fn title_for(source: &str, event: &str) -> &'static str {
         (_, "StopFailure") => "Claude Code failed",
         (_, "SubagentStart") => "Claude Code subagent started",
         (_, "SubagentStop") => "Claude Code subagent done",
+        (_, "AgentToolStart") => "Claude Code Agent tool started",
+        (_, "AgentToolStop") => "Claude Code Agent tool done",
         (_, _) => "Claude Code needs attention", // Notification
     }
 }

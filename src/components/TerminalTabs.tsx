@@ -169,13 +169,6 @@ function inferSessionVendor(session: TerminalSession): VendorKey | null {
   return inferVendor(`${session.startupCmd ?? ""} ${session.title}`);
 }
 
-function formatTabStatusUpdatedAt(value: string | null | undefined): string {
-  if (!value) return "无";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
-
 function parseProjectEnvVars(project?: Project): Record<string, string> | undefined {
   if (!project) return undefined;
   try {
@@ -211,7 +204,6 @@ interface SortableTabProps {
   isActive: boolean;
   isEditing: boolean;
   notification: TabNotificationState;
-  statusUpdatedAt: string | null;
   vendor?: VendorKey | null;
   onActivate: () => void;
   onClose: () => void;
@@ -230,7 +222,6 @@ function SortableTab({
   isActive,
   isEditing,
   notification,
-  statusUpdatedAt,
   vendor,
   onActivate,
   onClose,
@@ -248,7 +239,6 @@ function SortableTab({
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const skipNextBlurSubmitRef = useRef(false);
   const statusLabel = TAB_NOTIFICATION_LABELS[notification];
-  const statusTitle = `状态：${statusLabel}\n会话：${title}\n更新时间：${formatTabStatusUpdatedAt(statusUpdatedAt)}`;
   const tabMinWidthClass = "min-w-[92px]";
 
   const submitEdit = useCallback(() => {
@@ -310,7 +300,6 @@ function SortableTab({
             style={{ backgroundColor: TAB_NOTIFICATION_COLORS[notification], color: TAB_NOTIFICATION_COLORS[notification] }}
             role="status"
             aria-label={statusLabel}
-            title={statusTitle}
           />
           {vendor && (
             <span className="inline-flex shrink-0 items-center" aria-hidden="true">
@@ -352,7 +341,7 @@ function SortableTab({
               aria-label={`重命名终端 ${title}`}
             />
           ) : (
-            <span className="min-w-0 flex-1 truncate tracking-[0.01em]" title={statusTitle}>{title}</span>
+            <span className="min-w-0 flex-1 truncate tracking-[0.01em]">{title}</span>
           )}
           <button
             onClick={(e) => { e.stopPropagation(); onClose(); }}
@@ -374,23 +363,18 @@ function SortableTab({
 function DragOverlayTab({
   title,
   notification,
-  statusUpdatedAt,
   vendor,
 }: {
   title: string;
   notification: TabNotificationState;
-  statusUpdatedAt: string | null;
   vendor?: VendorKey | null;
 }) {
-  const statusLabel = TAB_NOTIFICATION_LABELS[notification];
-  const statusTitle = `状态：${statusLabel}\n会话：${title}\n更新时间：${formatTabStatusUpdatedAt(statusUpdatedAt)}`;
   const tabMinWidthClass = "min-w-[92px]";
 
   return (
     <div
       className={`ui-tab-trigger ui-terminal-drag-overlay-tab mx-1 flex h-7 ${tabMinWidthClass} max-w-[180px] items-center gap-2 rounded-lg px-3 text-[12px] font-medium`}
       data-selected="true"
-      title={statusTitle}
     >
       <span
         className="ui-tab-runtime-dot w-2 h-2 rounded-full shrink-0"
@@ -415,7 +399,6 @@ interface PaneTabBarProps {
   activeSessionId: string | null;
   editingSessionId: string | null;
   tabNotifications: Record<string, TabNotificationState>;
-  tabStatusDetails: Record<string, { updatedAt: string | null }>;
   resolvedTheme: "dark" | "light";
   terminalThemeName: string;
   lightThemePalette: ReturnType<typeof useSettingsStore.getState>["lightThemePalette"];
@@ -445,7 +428,6 @@ function PaneTabBar({
   activeSessionId,
   editingSessionId,
   tabNotifications,
-  tabStatusDetails,
   terminalBackgroundEnabled,
   terminalBackgroundImagePath,
   hiddenBackgroundSessionIds,
@@ -700,7 +682,6 @@ function PaneTabBar({
               isActive={session.id === activeSessionId}
               isEditing={editingSessionId === session.id}
               notification={tabNotifications[session.id] ?? "none"}
-              statusUpdatedAt={tabStatusDetails[session.id]?.updatedAt ?? null}
               vendor={inferSessionVendor(session)}
               onActivate={() => onActivateSession(session.id)}
               onClose={() => closePaneSessions([session.id])}
@@ -784,7 +765,6 @@ function PaneTabBar({
               <div className="max-h-72 overflow-y-auto">
                 {paneSessions.map((session, index) => {
                   const notification = tabNotifications[session.id] ?? "none";
-                  const statusLabel = TAB_NOTIFICATION_LABELS[notification];
                   return (
                     <button
                       key={session.id}
@@ -795,7 +775,7 @@ function PaneTabBar({
                         activatePaneSessionAt(index);
                         setTabListOpen(false);
                       }}
-                      title={`${session.title} · ${statusLabel}`}
+                      title={session.title}
                     >
                       <span
                         className="ui-tab-runtime-dot h-2 w-2 shrink-0 rounded-full"
@@ -824,7 +804,6 @@ interface PaneLeafViewProps {
   historyActive: boolean;
   editingSessionId: string | null;
   tabNotifications: Record<string, TabNotificationState>;
-  tabStatusDetails: Record<string, { updatedAt: string | null }>;
   fontSize: number;
   fontFamily: string;
   resolvedTheme: "dark" | "light";
@@ -858,7 +837,6 @@ function PaneLeafView({
   historyActive,
   editingSessionId,
   tabNotifications,
-  tabStatusDetails,
   fontSize,
   fontFamily,
   resolvedTheme,
@@ -897,7 +875,6 @@ function PaneLeafView({
           activeSessionId={activeSessionId}
           editingSessionId={editingSessionId}
           tabNotifications={tabNotifications}
-          tabStatusDetails={tabStatusDetails}
           terminalBackgroundEnabled={terminalBackgroundEnabled}
           terminalBackgroundImagePath={terminalBackgroundImagePath}
           hiddenBackgroundSessionIds={hiddenBackgroundSessionIds}
@@ -1141,13 +1118,12 @@ interface TerminalTabsProps {
 }
 
 export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: TerminalTabsProps = {}) {
-  const { sessions, activeSessionId, paneTree, tabNotifications, tabStatusDetails } = useTerminalStore(
+  const { sessions, activeSessionId, paneTree, tabNotifications } = useTerminalStore(
     useShallow((s) => ({
       sessions: s.sessions,
       activeSessionId: s.activeSessionId,
       paneTree: s.paneTree,
       tabNotifications: s.tabNotifications,
-      tabStatusDetails: s.tabStatusDetails,
     }))
   );
   const setActive = useTerminalStore((s) => s.setActive);
@@ -1676,7 +1652,6 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
       historyActive={historyActive}
       editingSessionId={editingSessionId}
       tabNotifications={tabNotifications}
-      tabStatusDetails={tabStatusDetails}
       fontSize={fontSize}
       fontFamily={fontFamily}
       resolvedTheme={resolvedTheme}
@@ -1728,7 +1703,6 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
     sessions,
     showBackgroundForSession,
     tabNotifications,
-    tabStatusDetails,
     terminalBackgroundEnabled,
     terminalBackgroundImagePath,
     unsplitTerminal,
@@ -1782,7 +1756,6 @@ export function TerminalTabs({ fullscreen = false, onToggleFullscreen }: Termina
                     <DragOverlayTab
                       title={activeDragSession.title}
                       notification={tabNotifications[activeDragSession.id] ?? "none"}
-                      statusUpdatedAt={tabStatusDetails[activeDragSession.id]?.updatedAt ?? null}
                       vendor={inferSessionVendor(activeDragSession)}
                     />
                   ) : null}

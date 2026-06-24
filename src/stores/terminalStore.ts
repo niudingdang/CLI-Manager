@@ -2,8 +2,8 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import type { TerminalSession, Project } from "../lib/types";
-import { logError, logInfo } from "../lib/logger";
+import type { SubagentTranscriptSource, TerminalSession, Project } from "../lib/types";
+import { logError, logInfo, logWarn } from "../lib/logger";
 import { useSettingsStore } from "./settingsStore";
 import { useSessionStore } from "./sessionStore";
 import { normalizeShellKey } from "../lib/shell";
@@ -38,7 +38,9 @@ export type CliHookEventName =
   | "StopFailure"
   | "PermissionRequest"
   | "SubagentStart"
-  | "SubagentStop";
+  | "SubagentStop"
+  | "AgentToolStart"
+  | "AgentToolStop";
 export type TabNotificationState = "none" | "running" | "attention" | "done" | "failed";
 export type ShellRuntimeEventName = "command_started" | "command_finished" | "prompt_shown";
 
@@ -85,6 +87,7 @@ export interface CliHookPayload {
   timestamp?: string | null;
   // 仅 SubagentStart 携带：定位子 Agent 转录 jsonl。
   agentId?: string | null;
+  toolUseId?: string | null;
   agentType?: string | null;
   agentTranscriptPath?: string | null;
   transcriptPath?: string | null;
@@ -94,6 +97,7 @@ export interface CliHookPayload {
 export interface SubagentTranscriptContent {
   content: string;
   ended: boolean;
+  source: SubagentTranscriptSource;
 }
 
 export interface SplitState {
@@ -171,7 +175,10 @@ let saveActiveIdTimer: ReturnType<typeof setTimeout> | null = null;
 let paneIdSeq = 0;
 let subagentSeq = 0;
 const subagentCloseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const subagentDiscoveryTimers = new Map<string, ReturnType<typeof setInterval>>();
 const SUBAGENT_CLOSE_DELAY_MS = 1500;
+const SUBAGENT_DISCOVERY_INTERVAL_MS = 1000;
+const SUBAGENT_DISCOVERY_TTL_MS = 15000;
 
 function createPaneId() {
   paneIdSeq += 1;
@@ -190,6 +197,205 @@ function scheduleSaveActiveId(id: string | null) {
   }, 200);
 }
 
+function trimOptional(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizePathForCompare(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/g, "").toLowerCase();
+}
+
+function isSameTranscriptPath(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
+  return normalizePathForCompare(a) === normalizePathForCompare(b);
+}
+
+function hashString(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = Math.imul(31, hash) + value.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function createSubagentPaneId(parentTabId: string, agentId: string | null, toolUseId: string | null, childTranscriptPath: string | null): string {
+  if (agentId) return `subagent:${agentId}`;
+  if (toolUseId) return `subagent:tool:${toolUseId}`;
+  if (childTranscriptPath) return `subagent:path:${hashString(childTranscriptPath)}`;
+  subagentSeq += 1;
+  return `subagent:${parentTabId}:${Date.now().toString(36)}:${subagentSeq.toString(36)}`;
+}
+
+function buildSubagentTitle(
+  parentSession: TerminalSession | undefined,
+  agentType: string | null,
+  existingSubagentCount: number
+): string {
+  const parentTitle = parentSession?.title || "Terminal";
+  const agentLabel = agentType || "子Agent";
+
+  // 如果同一父终端已经有子 Agent，添加序号
+  if (existingSubagentCount > 0) {
+    return `${agentLabel} #${existingSubagentCount + 1} (${parentTitle})`;
+  }
+
+  // 首个子 Agent：显示父终端标题，便于识别来源
+  return `${agentLabel} (${parentTitle})`;
+}
+
+function resolveSubagentTranscriptSource(payload: CliHookPayload): SubagentTranscriptSource {
+  const childPath = trimOptional(payload.agentTranscriptPath);
+  const parentPath = trimOptional(payload.transcriptPath);
+
+  if (childPath && !isSameTranscriptPath(childPath, parentPath)) {
+    return {
+      kind: "child-jsonl",
+      transcriptPath: childPath,
+      parentTranscriptPath: parentPath ?? undefined,
+    };
+  }
+
+  if (payload.event === "AgentToolStart" || payload.event === "AgentToolStop") {
+    return {
+      kind: "pending",
+      parentTranscriptPath: parentPath ?? undefined,
+      reason: childPath ? "child transcript path equals parent transcript path" : "waiting for Agent tool child transcript discovery",
+    };
+  }
+
+  if (parentPath) {
+    return {
+      kind: "parent-jsonl",
+      transcriptPath: parentPath,
+      parentTranscriptPath: parentPath,
+      reason: childPath ? "child transcript path equals parent transcript path" : "missing child transcript path",
+    };
+  }
+
+  return {
+    kind: "lifecycle-only",
+    reason: "missing transcript path",
+  };
+}
+
+function shouldUpgradeSubagentSource(previous: SubagentTranscriptSource | undefined, next: SubagentTranscriptSource): boolean {
+  if (!previous) return true;
+  if (previous.kind === "child-jsonl") return next.kind === "child-jsonl" && previous.transcriptPath !== next.transcriptPath;
+  if (next.kind === "child-jsonl") return true;
+  if (previous.kind === "pending" && next.kind !== "pending") return true;
+  if (previous.kind === "lifecycle-only" && next.kind === "parent-jsonl") return true;
+  return previous.kind === next.kind && previous.reason !== next.reason;
+}
+
+function mergeSubagentSource(previous: SubagentTranscriptSource | undefined, next: SubagentTranscriptSource): SubagentTranscriptSource {
+  if (!shouldUpgradeSubagentSource(previous, next)) return previous ?? next;
+  if (next.kind === "child-jsonl") return next;
+  return {
+    ...next,
+    parentTranscriptPath: next.parentTranscriptPath ?? previous?.parentTranscriptPath,
+  };
+}
+
+function shouldSubscribeSubagentSource(previous: SubagentTranscriptSource | undefined, next: SubagentTranscriptSource): boolean {
+  return next.kind === "child-jsonl" && Boolean(next.transcriptPath) && previous?.transcriptPath !== next.transcriptPath;
+}
+
+function shouldAttemptDerivedChildTranscript(payload: CliHookPayload, source: SubagentTranscriptSource): boolean {
+  return payload.event === "AgentToolStop" && source.kind !== "child-jsonl" && Boolean(trimOptional(payload.agentId));
+}
+
+/** AgentToolStart pending 兜底：短时轮询 subagents 目录发现新 child JSONL。 */
+function startSubagentDiscovery(
+  parentTabId: string,
+  parentSessionId: string | null,
+  cwd: string | null
+) {
+  if (!cwd || !parentSessionId) return;
+  const key = `${parentTabId}:${parentSessionId}`;
+  if (subagentDiscoveryTimers.has(key)) return;
+
+  const startTime = Date.now();
+  let knownAgents = new Set<string>();
+
+  const intervalId = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    if (elapsed > SUBAGENT_DISCOVERY_TTL_MS) {
+      clearInterval(intervalId);
+      subagentDiscoveryTimers.delete(key);
+      logInfo("[subagent_discovery] TTL expired", { parentTabId, elapsed });
+      return;
+    }
+
+    void invoke<string[]>("subagent_transcript_discover", { cwd, sessionId: parentSessionId })
+      .then((files) => {
+        for (const filename of files) {
+          if (knownAgents.has(filename)) continue;
+          knownAgents.add(filename);
+
+          const match = filename.match(/^agent-(.+)\.jsonl$/);
+          if (!match) continue;
+          const discoveredAgentId = match[1];
+
+          logInfo("[subagent_discovery] found new child", { parentTabId, filename, discoveredAgentId });
+
+          const store = useTerminalStore.getState();
+          const existingSession = store.sessions.find(
+            (s) =>
+              s.kind === "subagent-transcript" &&
+              s.subagent?.parentSessionId === parentTabId &&
+              (s.subagent.agentId === discoveredAgentId || s.id === `subagent:${discoveredAgentId}`)
+          );
+
+          if (existingSession) {
+            // 推导 child JSONL 路径并升级 pane
+            void invoke<string>("subagent_transcript_subscribe", {
+              key: existingSession.id,
+              transcriptPath: null,
+              cwd,
+              sessionId: parentSessionId,
+              agentId: discoveredAgentId,
+            })
+              .then((derivedPath) => {
+                const childSource: SubagentTranscriptSource = {
+                  kind: "child-jsonl",
+                  transcriptPath: derivedPath,
+                };
+                useTerminalStore.setState((state) => ({
+                  sessions: state.sessions.map((session) =>
+                    session.id === existingSession.id && session.kind === "subagent-transcript" && session.subagent
+                      ? { ...session, subagent: { ...session.subagent, agentId: discoveredAgentId, source: childSource } }
+                      : session
+                  ),
+                  subagentTranscripts: {
+                    ...state.subagentTranscripts,
+                    [existingSession.id]: {
+                      ...(state.subagentTranscripts[existingSession.id] ?? { content: "", ended: false }),
+                      source: childSource,
+                    },
+                  },
+                }));
+                logInfo("[subagent_discovery] upgraded to child-jsonl", { parentTabId, agentId: discoveredAgentId, derivedPath });
+              })
+              .catch((err) => logWarn("[subagent_discovery] subscribe failed", { parentTabId, agentId: discoveredAgentId, err }));
+          }
+        }
+
+        if (knownAgents.size > 0) {
+          clearInterval(intervalId);
+          subagentDiscoveryTimers.delete(key);
+          logInfo("[subagent_discovery] stopped after finding agents", { parentTabId, count: knownAgents.size });
+        }
+      })
+      .catch((err) => {
+        logWarn("[subagent_discovery] scan failed", { parentTabId, err });
+      });
+  }, SUBAGENT_DISCOVERY_INTERVAL_MS);
+
+  subagentDiscoveryTimers.set(key, intervalId);
+  logInfo("[subagent_discovery] started", { parentTabId, cwd, sessionId: parentSessionId, ttlMs: SUBAGENT_DISCOVERY_TTL_MS });
+}
+
 function findSubagentSessionId(sessions: TerminalSession[], payload: CliHookPayload): string | null {
   const agentId = payload.agentId?.trim() || null;
   if (agentId) {
@@ -200,6 +406,21 @@ function findSubagentSessionId(sessions: TerminalSession[], payload: CliHookPayl
     );
     if (byAgent) return byAgent.id;
   }
+
+  const toolUseId = payload.toolUseId?.trim() || null;
+  if (toolUseId) {
+    const byTool = sessions.find(
+      (session) =>
+        session.kind === "subagent-transcript" &&
+        (session.subagent?.toolUseId === toolUseId || session.id === `subagent:tool:${toolUseId}`)
+    );
+    if (byTool) return byTool.id;
+  }
+
+  // Fallback：仅当 payload 既无 agentId 也无 toolUseId（完全无法识别）时，才通过 parentTabId 推断。
+  // 若 payload 带 agentId/toolUseId 但未匹配到，说明是新的子 Agent，应返回 null 以创建新 Tab，
+  // 避免并发场景下第二个子 Agent 被错误合并到第一个。
+  if (agentId || toolUseId) return null;
 
   const candidates = sessions.filter(
     (session) => session.kind === "subagent-transcript" && session.subagent?.parentSessionId === payload.tabId
@@ -999,39 +1220,163 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     const parentTabId = payload.tabId;
     const sessions = get().sessions;
     // 多窗口隔离：hook 事件广播到所有窗口，仅拥有该 Tab 的窗口处理。
-    if (!sessions.some((session) => session.id === parentTabId)) return;
+    if (!sessions.some((session) => session.id === parentTabId)) {
+      logInfo("[subagent_transcript] parent tab not found, skipping", {
+        parentTabId,
+        event: payload.event,
+        agentId: payload.agentId,
+        sessionCount: sessions.length,
+        sessionIds: sessions.map((s) => s.id).slice(0, 5),
+      });
+      return;
+    }
 
     const tree = get().paneTree;
     if (!tree) return;
 
-    const agentId = payload.agentId?.trim() || null;
-    const pseudoId = agentId ? `subagent:${agentId}` : `subagent:${parentTabId}:${(subagentSeq += 1)}`;
+    const agentId = trimOptional(payload.agentId);
+    const toolUseId = trimOptional(payload.toolUseId);
+    const resolvedSource = resolveSubagentTranscriptSource(payload);
+    const existingSessionId = findSubagentSessionId(sessions, payload);
+    const pseudoId = existingSessionId ?? createSubagentPaneId(parentTabId, agentId, toolUseId, resolvedSource.kind === "child-jsonl" ? resolvedSource.transcriptPath ?? null : null);
+    const previousSource = get().subagentTranscripts[pseudoId]?.source;
+    const source = mergeSubagentSource(previousSource, resolvedSource);
+    const shouldSubscribe = shouldSubscribeSubagentSource(previousSource, source);
 
-    const subscribe = () => {
+    logInfo("[subagent_transcript] source resolved", {
+      event: payload.event,
+      pseudoId,
+      agentId,
+      toolUseId,
+      sourceKind: source.kind,
+      hasAgentTranscriptPath: Boolean(trimOptional(payload.agentTranscriptPath)),
+      hasParentTranscriptPath: Boolean(trimOptional(payload.transcriptPath)),
+      samePath: isSameTranscriptPath(trimOptional(payload.agentTranscriptPath), trimOptional(payload.transcriptPath)),
+      reason: source.reason,
+    });
+
+    const subscribeChild = () => {
+      if (source.kind !== "child-jsonl" || !source.transcriptPath) {
+        logWarn("[subagent_transcript] skip full parent transcript tail", {
+          event: payload.event,
+          pseudoId,
+          agentId,
+          toolUseId,
+          sourceKind: source.kind,
+          reason: source.reason,
+        });
+        return;
+      }
       void invoke<string>("subagent_transcript_subscribe", {
         key: pseudoId,
-        transcriptPath: payload.agentTranscriptPath ?? payload.transcriptPath ?? null,
+        transcriptPath: source.transcriptPath,
         cwd: payload.cwd ?? null,
         sessionId: payload.sessionId ?? null,
         agentId,
       }).catch((err) => logError("subagent_transcript_subscribe failed", { pseudoId, err }));
     };
 
-    // 去重：同一子 Agent 已有面板则只确保订阅（幂等）。
+    const subscribeDerivedChild = () => {
+      if (!shouldAttemptDerivedChildTranscript(payload, source)) return false;
+      void invoke<string>("subagent_transcript_subscribe", {
+        key: pseudoId,
+        transcriptPath: null,
+        cwd: payload.cwd ?? null,
+        sessionId: payload.sessionId ?? null,
+        agentId,
+      })
+        .then((derivedPath) => {
+          const childSource: SubagentTranscriptSource = {
+            kind: "child-jsonl",
+            transcriptPath: derivedPath,
+            parentTranscriptPath: source.parentTranscriptPath,
+          };
+          useTerminalStore.setState((state) => ({
+            sessions: state.sessions.map((session) =>
+              session.id === pseudoId && session.kind === "subagent-transcript" && session.subagent
+                ? { ...session, subagent: { ...session.subagent, source: childSource } }
+                : session
+            ),
+            subagentTranscripts: {
+              ...state.subagentTranscripts,
+              [pseudoId]: {
+                ...(state.subagentTranscripts[pseudoId] ?? { content: "", ended: false }),
+                source: childSource,
+              },
+            },
+          }));
+          logInfo("[subagent_transcript] derived child transcript subscription", { pseudoId, agentId, derivedPath });
+        })
+        .catch((err) => logWarn("[subagent_transcript] derived child transcript unavailable", { pseudoId, agentId, err }));
+      return true;
+    };
+
+    // 去重：同一子 Agent 已有面板则更新 source；仅发现/切换 child JSONL 时订阅。
     if (sessions.some((session) => session.id === pseudoId)) {
-      subscribe();
+      const agentType = payload.agentType?.trim() || null;
+      const parentSession = sessions.find((session) => session.id === parentTabId);
+      const existingSession = sessions.find((session) => session.id === pseudoId);
+
+      // 如果这次更新带来了 agentType（通常是 SubagentStart 绑定到 AgentToolStart 创建的 placeholder），重建标题。
+      const shouldUpdateTitle = agentType && existingSession && (!existingSession.subagent?.agentType);
+      const newTitle = shouldUpdateTitle
+        ? buildSubagentTitle(
+            parentSession,
+            agentType,
+            sessions.filter((s) => s.kind === "subagent-transcript" && s.subagent?.parentSessionId === parentTabId && s.id !== pseudoId).length
+          )
+        : undefined;
+
+      set((state) => ({
+        sessions: state.sessions.map((session) =>
+          session.id === pseudoId && session.kind === "subagent-transcript" && session.subagent
+            ? {
+                ...session,
+                title: newTitle ?? session.title,
+                subagent: {
+                  ...session.subagent,
+                  agentId: agentId ?? session.subagent.agentId,
+                  toolUseId: toolUseId ?? session.subagent.toolUseId,
+                  agentType: agentType ?? session.subagent.agentType,
+                  source,
+                },
+              }
+            : session
+        ),
+        subagentTranscripts: {
+          ...state.subagentTranscripts,
+          [pseudoId]: { ...(state.subagentTranscripts[pseudoId] ?? { content: "", ended: false }), ended: false, source },
+        },
+      }));
+      if (shouldSubscribe) subscribeChild();
+      else if (!subscribeDerivedChild() && source.kind !== "child-jsonl") subscribeChild();
+      return;
+    }
+
+    // AgentToolStart/AgentToolStop 在并发场景下无法可靠关联到 SubagentStart（前者只有 toolUseId，后者只有 agentId）。
+    // 策略：这两个事件只触发 discovery，不创建 UI；SubagentStart 创建真实 Tab，discovery 负责升级内容源。
+    if (payload.event === "AgentToolStart" || payload.event === "AgentToolStop") {
+      if (!agentId && (resolvedSource.kind === "pending" || resolvedSource.kind === "lifecycle-only")) {
+        startSubagentDiscovery(parentTabId, payload.sessionId ?? null, payload.cwd ?? null);
+      }
       return;
     }
 
     const agentType = payload.agentType?.trim() || null;
+    const parentSession = sessions.find((session) => session.id === parentTabId);
+    const existingSubagentCount = sessions.filter(
+      (session) => session.kind === "subagent-transcript" && session.subagent?.parentSessionId === parentTabId
+    ).length;
     const pseudoSession: TerminalSession = {
       id: pseudoId,
-      title: agentType ?? "子 Agent",
+      title: buildSubagentTitle(parentSession, agentType, existingSubagentCount),
       kind: "subagent-transcript",
       subagent: {
         parentSessionId: parentTabId,
         agentId: agentId ?? undefined,
+        toolUseId: toolUseId ?? undefined,
         agentType: agentType ?? undefined,
+        source,
       },
     };
 
@@ -1055,18 +1400,47 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     set((state) => ({
       sessions: newSessions,
       paneTree: nextTree,
-      subagentTranscripts: { ...state.subagentTranscripts, [pseudoId]: { content: "", ended: false } },
+      subagentTranscripts: { ...state.subagentTranscripts, [pseudoId]: { content: "", ended: false, source } },
     }));
 
     // 持久化（sessionStore 会过滤掉转录伪会话）。
     void useSessionStore.getState().saveSessions(newSessions).catch(() => {});
 
-    subscribe();
+    if (shouldSubscribe) subscribeChild();
+    else if (!subscribeDerivedChild()) subscribeChild();
   },
 
   finishSubagentTranscript: (payload) => {
     const sessionId = findSubagentSessionId(get().sessions, payload);
-    if (!sessionId) return;
+    if (!sessionId) {
+      const candidates = get().sessions.filter(
+        (session) => session.kind === "subagent-transcript" && session.subagent?.parentSessionId === payload.tabId
+      );
+      logWarn("[subagent_transcript] stop target not resolved", {
+        tabId: payload.tabId,
+        agentId: trimOptional(payload.agentId),
+        candidateCount: candidates.length,
+      });
+      return;
+    }
+    logInfo("[subagent_transcript] stop target resolved", {
+      sessionId,
+      tabId: payload.tabId,
+      agentId: trimOptional(payload.agentId),
+    });
+
+    // 停止对应的目录扫描（如果有）
+    const parentSessionId = payload.sessionId ?? null;
+    if (parentSessionId) {
+      const discoveryKey = `${payload.tabId}:${parentSessionId}`;
+      const discoveryTimer = subagentDiscoveryTimers.get(discoveryKey);
+      if (discoveryTimer) {
+        clearInterval(discoveryTimer);
+        subagentDiscoveryTimers.delete(discoveryKey);
+        logInfo("[subagent_discovery] stopped by finishSubagentTranscript", { discoveryKey });
+      }
+    }
+
     set((state) => {
       const prev = state.subagentTranscripts[sessionId];
       if (!prev) return state;

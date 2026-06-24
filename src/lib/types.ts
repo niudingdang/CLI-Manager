@@ -55,6 +55,15 @@ export type TreeNode =
 
 export type TerminalSessionKind = "pty" | "subagent-transcript";
 
+export type SubagentTranscriptSourceKind = "pending" | "child-jsonl" | "parent-jsonl" | "lifecycle-only";
+
+export interface SubagentTranscriptSource {
+  kind: SubagentTranscriptSourceKind;
+  transcriptPath?: string;
+  parentTranscriptPath?: string;
+  reason?: string;
+}
+
 export interface TerminalSession {
   id: string;
   projectId?: string;
@@ -71,7 +80,9 @@ export interface TerminalSession {
   subagent?: {
     parentSessionId: string;
     agentId?: string;
+    toolUseId?: string;
     agentType?: string;
+    source?: SubagentTranscriptSource;
   };
 }
 

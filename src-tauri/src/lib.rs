@@ -1,9 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod claude_hook;
-pub mod hook_client;
 mod commands;
 mod git_watcher;
+pub mod hook_client;
 mod pty;
 mod shell_resolver;
 mod sync;
@@ -373,6 +373,7 @@ pub fn run() {
             commands::git::git_watch_stop,
             commands::subagent_transcript::subagent_transcript_subscribe,
             commands::subagent_transcript::subagent_transcript_unsubscribe,
+            commands::subagent_transcript::subagent_transcript_discover,
             commands::model_pricing::model_prices_set_cache,
             commands::model_pricing::model_prices_sync,
             commands::system_notification::is_wsl,

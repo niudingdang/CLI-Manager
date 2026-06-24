@@ -21,6 +21,20 @@ const ROLE_COLOR: Record<string, string> = {
   tool: TERM.yellow,
 };
 
+const SOURCE_LABEL = {
+  pending: "Pending",
+  "child-jsonl": "Child JSONL",
+  "parent-jsonl": "Parent JSONL",
+  "lifecycle-only": "Lifecycle only",
+} as const;
+
+const SOURCE_COLOR = {
+  pending: TERM.blue,
+  "child-jsonl": TERM.green,
+  "parent-jsonl": TERM.yellow,
+  "lifecycle-only": TERM.dim,
+} as const;
+
 /** 从 Claude transcript 的 message.content（string 或 block 数组）提取可读文本。 */
 function extractText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -121,6 +135,7 @@ function parseTranscript(content: string): RenderedMessage[] {
 export function SubagentTranscriptView({ sessionId, title }: Props) {
   const transcript = useTerminalStore((s) => s.subagentTranscripts[sessionId]);
   const content = transcript?.content ?? "";
+  const source = transcript?.source;
   const messages = useMemo(() => parseTranscript(content), [content]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
@@ -143,6 +158,14 @@ export function SubagentTranscriptView({ sessionId, title }: Props) {
         style={{ borderBottom: `1px solid ${TERM.border}`, color: TERM.dim }}
       >
         <span className="truncate text-[11px]">{title ?? "子 Agent 转录"}</span>
+        {source && (
+          <span
+            className="shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] uppercase tracking-wide"
+            style={{ borderColor: SOURCE_COLOR[source.kind], color: SOURCE_COLOR[source.kind] }}
+          >
+            {SOURCE_LABEL[source.kind]}
+          </span>
+        )}
         <span
           className="ml-auto shrink-0 text-[10px]"
           style={{ color: transcript?.ended ? TERM.dim : TERM.green }}
@@ -152,8 +175,25 @@ export function SubagentTranscriptView({ sessionId, title }: Props) {
       </div>
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-auto px-3 py-2">
         {messages.length === 0 ? (
-          <div className="py-10 text-center text-[11px]" style={{ color: TERM.dim }}>
-            等待子 Agent 输出…
+          <div className="mx-auto flex max-w-md flex-col items-center gap-2 py-10 text-center text-[11px]" style={{ color: TERM.dim }}>
+            {source?.kind === "pending" ? (
+              <>
+                <div style={{ color: TERM.blue }}>已捕获 Agent 工具调用，正在等待子 Agent transcript。</div>
+                <div>CLI-Manager 只会短时订阅相关子任务 JSONL，不会扫描所有终端输出。</div>
+              </>
+            ) : source?.kind === "parent-jsonl" ? (
+              <>
+                <div style={{ color: TERM.yellow }}>Claude Code 未暴露独立子 Agent transcript。</div>
+                <div>当前只检测到父会话 transcript；为避免重复显示主会话内容，此视图仅保留子任务状态。</div>
+              </>
+            ) : source?.kind === "lifecycle-only" ? (
+              <>
+                <div>Claude Code 当前没有暴露可读取的子 Agent transcript。</div>
+                <div>此视图仅显示启动、运行、完成或失败状态。</div>
+              </>
+            ) : (
+              <div>等待子 Agent 输出…</div>
+            )}
           </div>
         ) : (
           <ul className="subagent-transcript-list">

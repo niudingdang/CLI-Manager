@@ -6,7 +6,7 @@ Concrete contracts for Claude/Codex hook integration.
 
 ### 1. Scope / Trigger
 
-- Trigger: a CLI emits `SubagentStart` and CLI-Manager opens a read-only transcript pane for that child agent; the matching `SubagentStop` marks it finished and closes the pane after a short grace period.
+- Trigger: a CLI emits `SubagentStart`, or Claude emits `PreToolUse`/`PostToolUse` for `Agent`/`Task` as fallback lifecycle signals; CLI-Manager opens a read-only transcript pane for that child agent and marks it finished after the matching stop signal.
 - Applies to: hook installation, hidden `__hook` client, local TCP bridge payload, frontend `CliHookPayload`, and transcript subscription.
 
 ### 2. Signatures
@@ -14,15 +14,23 @@ Concrete contracts for Claude/Codex hook integration.
 - Installed hook command: `<cli-manager-exe> __hook --source <claude|codex> --event <event>`.
 - Bridge event name: `claude-hook-notification`.
 - Frontend subscribe command: `subagent_transcript_subscribe({ key, transcriptPath, cwd, sessionId, agentId })`.
+- Frontend store action on start/update: `openSubagentTranscript(payload)`.
 - Frontend store action on stop: `finishSubagentTranscript(payload)`.
+- Agent tool fallback hook names: `AgentToolStart` (from PreToolUse with matcher Agent), `AgentToolStop` (from PostToolUse with matcher Agent).
 
 ### 3. Contracts
 
 - Common payload fields: `tabId`, `source`, `event`, `title`, `message`, `sessionId`, `cwd`, `timestamp`.
-- Claude sub-agent fields: `agentId`, `agentType`, `agentTranscriptPath`.
+- Claude Agent tool fallback events are normalized as `AgentToolStart` from `PreToolUse` and `AgentToolStop` from `PostToolUse`; hook installer must use a matcher limited to `Agent`/`Task`.
+- Claude sub-agent fields: `agentId`, `toolUseId`, `agentType`, `agentTranscriptPath`.
 - Codex sub-agent fields: `agentId`, `agentType`, `transcriptPath`.
-- Frontend transcript path priority: `agentTranscriptPath ?? transcriptPath ?? derive from cwd/sessionId/agentId`.
-- `SubagentStart` and `SubagentStop` must be installed/uninstalled together for each source.
+- Frontend transcript source resolution:
+  - Use `agentTranscriptPath` only when it is present and differs from `transcriptPath`; this is `child-jsonl` mode.
+  - Do not silently render the full parent `transcriptPath` as child output when `agentTranscriptPath` is missing or equals `transcriptPath`; degrade to `parent-jsonl` filtered mode or `lifecycle-only` mode.
+  - Backend derivation from `cwd/sessionId/agentId` remains available for explicit transcript subscriptions, but frontend must not use it to disguise a parent transcript as child output.
+  - `AgentToolStart` should create/update a `pending` pane only; it must not subscribe to the parent transcript.
+  - `AgentToolStop` may upgrade the matching pending pane to `child-jsonl` when it has an independent `agentTranscriptPath` or enough `cwd/sessionId/agentId` data to derive `subagents/agent-<agentId>.jsonl`.
+- `SubagentStart` and `SubagentStop` must be installed/uninstalled together for each source. Claude `PreToolUse`/`PostToolUse` Agent/Task fallback hooks must be installed/uninstalled with the Claude subagent hooks.
 - Stop routing priority: match by `agentId`; if missing, close only when exactly one transcript pane belongs to the parent `tabId`.
 
 ### 4. Validation & Error Matrix
@@ -43,7 +51,7 @@ Concrete contracts for Claude/Codex hook integration.
 
 ### 6. Tests Required
 
-- Hook install/uninstall tests assert `SubagentStart` and `SubagentStop` are written and removed for the affected source.
+- Hook install/uninstall tests assert `SubagentStart`/`SubagentStop` and, for Claude, `PreToolUse`/`PostToolUse` Agent tool fallback commands are written and removed for the affected source.
 - Rust compile check must pass after bridge payload or command signature changes.
 - TypeScript type-check must pass after `CliHookPayload` field changes.
 
@@ -52,13 +60,20 @@ Concrete contracts for Claude/Codex hook integration.
 #### Wrong
 
 ```ts
-transcriptPath: payload.agentTranscriptPath ?? null
+// Falls back to the parent session transcript and can make multiple child panes
+// render the same main conversation as if it were child output.
+transcriptPath: payload.agentTranscriptPath ?? payload.transcriptPath ?? null
 ```
 
 #### Correct
 
 ```ts
-transcriptPath: payload.agentTranscriptPath ?? payload.transcriptPath ?? null
+const source = resolveSubagentTranscriptSource(payload);
+if (source.kind === "child-jsonl") {
+  subscribe(source.transcriptPath);
+} else {
+  showDegradedSourceState(source.kind, source.reason);
+}
 ```
 
 ## Scenario: System-Level Hook Notifications

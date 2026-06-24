@@ -158,6 +158,8 @@ fn install_claude_hooks(claude_dir: &Path) -> Result<(), String> {
             "StopFailure",
             "SubagentStart",
             "SubagentStop",
+            "PreToolUse",
+            "PostToolUse",
         ],
         &CLAUDE_LEGACY_SCRIPTS,
     );
@@ -199,6 +201,21 @@ fn install_claude_hooks(claude_dir: &Path) -> Result<(), String> {
         "SubagentStop",
         build_command(&exe, "claude", "SubagentStop"),
     );
+    // Agent 工具 fallback：Claude 版本没有独立 SubagentStart/Stop 字段时，
+    // 通过 PreToolUse/PostToolUse 捕获 Task/Agent 调用生命周期，前端先开 pending 面板，
+    // 只在后续发现 child JSONL 时订阅该子任务文件。
+    add_hook_command_with_matcher(
+        &mut settings,
+        "PreToolUse",
+        "Agent|Task",
+        build_command(&exe, "claude", "AgentToolStart"),
+    );
+    add_hook_command_with_matcher(
+        &mut settings,
+        "PostToolUse",
+        "Agent|Task",
+        build_command(&exe, "claude", "AgentToolStop"),
+    );
     // 清理历史 .ps1 脚本文件（若存在），新方案不再依赖脚本文件
     cleanup_legacy_scripts(&claude_dir.join("hooks"), &CLAUDE_LEGACY_SCRIPTS);
     write_json(&settings_path, &settings)
@@ -220,6 +237,8 @@ fn uninstall_claude_hooks(claude_dir: &Path) -> Result<(), String> {
             "StopFailure",
             "SubagentStart",
             "SubagentStop",
+            "PreToolUse",
+            "PostToolUse",
         ],
         &CLAUDE_LEGACY_SCRIPTS,
     );
@@ -234,7 +253,14 @@ fn install_codex_hooks(codex_dir: &Path) -> Result<(), String> {
     // 先清掉旧版本注册的条目（含历史 .ps1 命令与本应用 __hook 命令），保证安装即升级
     remove_hook_commands(
         &mut settings,
-        &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "SubagentStart", "SubagentStop"],
+        &[
+            "SessionStart",
+            "UserPromptSubmit",
+            "PermissionRequest",
+            "Stop",
+            "SubagentStart",
+            "SubagentStop",
+        ],
         &CODEX_LEGACY_SCRIPTS,
     );
     // SessionStart：会话启动/恢复即回传 sessionId 绑定终端 Tab（不改 Tab 状态）
@@ -353,7 +379,14 @@ fn uninstall_codex_hooks(codex_dir: &Path) -> Result<(), String> {
     ensure_root_object(&settings, "hooks.json")?;
     remove_hook_commands(
         &mut settings,
-        &["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "SubagentStart", "SubagentStop"],
+        &[
+            "SessionStart",
+            "UserPromptSubmit",
+            "PermissionRequest",
+            "Stop",
+            "SubagentStart",
+            "SubagentStop",
+        ],
         &CODEX_LEGACY_SCRIPTS,
     );
     write_json(&hooks_path, &settings)
@@ -452,7 +485,22 @@ fn build_claude_status(claude_dir: Option<PathBuf>) -> Result<ToolHookSettingsSt
         stop_hook_installed: registered("Stop"),
         failure_hook_installed: registered("StopFailure"),
         failure_hook_required: true,
-        subagent_start_hook_installed: registered("SubagentStart") && registered("SubagentStop"),
+        subagent_start_hook_installed: registered("SubagentStart")
+            && registered("SubagentStop")
+            && registered_exact_command(
+                &settings,
+                exe.as_deref(),
+                "PreToolUse",
+                "claude",
+                "AgentToolStart",
+            )
+            && registered_exact_command(
+                &settings,
+                exe.as_deref(),
+                "PostToolUse",
+                "claude",
+                "AgentToolStop",
+            ),
         subagent_start_hook_required: true,
         hooks_feature_installed: true,
     };
@@ -634,7 +682,12 @@ fn add_hook_command(settings: &mut Value, event: &str, command: String) {
     add_hook_command_with_matcher(settings, event, "", command);
 }
 
-fn add_hook_command_with_matcher(settings: &mut Value, event: &str, matcher: &str, command: String) {
+fn add_hook_command_with_matcher(
+    settings: &mut Value,
+    event: &str,
+    matcher: &str,
+    command: String,
+) {
     let root = ensure_object(settings);
     let hooks = ensure_child_object(root, "hooks");
     let event_value = hooks
@@ -696,6 +749,22 @@ fn remove_hook_commands(settings: &mut Value, events: &[&str], script_names: &[&
             root.remove("hooks");
         }
     }
+}
+
+fn registered_exact_command(
+    settings: &Value,
+    exe: Option<&str>,
+    hook_event: &str,
+    source: &str,
+    command_event: &str,
+) -> bool {
+    exe.is_some_and(|exe| {
+        exact_command_registered(
+            settings,
+            hook_event,
+            &build_command(exe, source, command_event),
+        )
+    })
 }
 
 fn exact_command_registered(settings: &Value, event: &str, command: &str) -> bool {
@@ -876,9 +945,12 @@ mod tests {
         assert!(after_install.contains("--event SubagentStart"));
         assert!(after_install.contains("--event SubagentStop"));
 
-        hook_settings_uninstall_codex(Some(path_to_string(&claude_dir)), Some(path_to_string(&codex_dir)))
-            .await
-            .unwrap();
+        hook_settings_uninstall_codex(
+            Some(path_to_string(&claude_dir)),
+            Some(path_to_string(&codex_dir)),
+        )
+        .await
+        .unwrap();
         let after_uninstall = fs::read_to_string(codex_dir.join(CODEX_HOOKS_FILE_NAME)).unwrap();
         assert!(!after_uninstall.contains("--event SubagentStart"));
         assert!(!after_uninstall.contains("--event SubagentStop"));
@@ -918,13 +990,20 @@ mod tests {
         let after_install = fs::read_to_string(claude_dir.join(CLAUDE_SETTINGS_FILE_NAME)).unwrap();
         assert!(after_install.contains("--event SubagentStart"));
         assert!(after_install.contains("--event SubagentStop"));
+        assert!(after_install.contains("PreToolUse"));
+        assert!(after_install.contains("PostToolUse"));
+        assert!(after_install.contains("--event AgentToolStart"));
+        assert!(after_install.contains("--event AgentToolStop"));
 
         hook_settings_uninstall(Some(path_to_string(&claude_dir)), None)
             .await
             .unwrap();
-        let after_uninstall = fs::read_to_string(claude_dir.join(CLAUDE_SETTINGS_FILE_NAME)).unwrap();
+        let after_uninstall =
+            fs::read_to_string(claude_dir.join(CLAUDE_SETTINGS_FILE_NAME)).unwrap();
         assert!(!after_uninstall.contains("--event SubagentStart"));
         assert!(!after_uninstall.contains("--event SubagentStop"));
+        assert!(!after_uninstall.contains("--event AgentToolStart"));
+        assert!(!after_uninstall.contains("--event AgentToolStop"));
     }
 
     #[tokio::test]

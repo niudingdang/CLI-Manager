@@ -65,7 +65,7 @@ pub async fn get_current_git_branch(path: String) -> Result<Option<String>, Stri
 
     tokio::task::spawn_blocking(move || {
         // 尝试打开 git 仓库
-        let repo = match open_git_repo(&path) {
+        let repo = match Repository::open(&path) {
             Ok(r) => r,
             Err(_) => return Ok(None), // 非 git 仓库或无权限
         };
@@ -103,7 +103,10 @@ pub struct GitFileChange {
 /// * `Err(String)` - 错误信息
 #[tauri::command]
 pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>, String> {
-    log::info!("[git_get_changes] 开始查询 Git 变更, project_path: {}", project_path);
+    log::info!(
+        "[git_get_changes] 开始查询 Git 变更, project_path: {}",
+        project_path
+    );
 
     tokio::task::spawn_blocking(move || {
         let path = Path::new(&project_path);
@@ -117,12 +120,11 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
         log::info!("[git_get_changes] 路径存在，尝试打开 Git 仓库");
 
         // 打开 git 仓库
-        let repo = open_git_repo(path)
-            .map_err(|e| {
-                let err_msg = format!("不是 Git 仓库或无法访问: {}", e);
-                log::error!("[git_get_changes] {}", err_msg);
-                err_msg
-            })?;
+        let repo = open_git_repo(path).map_err(|e| {
+            let err_msg = format!("不是 Git 仓库或无法访问: {}", e);
+            log::error!("[git_get_changes] {}", err_msg);
+            err_msg
+        })?;
 
         log::info!("[git_get_changes] Git 仓库打开成功");
 
@@ -131,13 +133,11 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
         opts.include_untracked(true);
         opts.recurse_untracked_dirs(true);
 
-        let statuses = repo
-            .statuses(Some(&mut opts))
-            .map_err(|e| {
-                let err_msg = format!("获取 Git 状态失败: {}", e);
-                log::error!("[git_get_changes] {}", err_msg);
-                err_msg
-            })?;
+        let statuses = repo.statuses(Some(&mut opts)).map_err(|e| {
+            let err_msg = format!("获取 Git 状态失败: {}", e);
+            log::error!("[git_get_changes] {}", err_msg);
+            err_msg
+        })?;
 
         log::info!("[git_get_changes] 获取到 {} 个状态条目", statuses.len());
 
@@ -172,7 +172,10 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
             });
         }
 
-        log::info!("[git_get_changes] 查询完成，返回 {} 个变更文件", changes.len());
+        log::info!(
+            "[git_get_changes] 查询完成，返回 {} 个变更文件",
+            changes.len()
+        );
         Ok(changes)
     })
     .await
@@ -304,7 +307,7 @@ pub async fn git_get_file_diff(
             return Err(format!("路径不存在: {}", project_path));
         }
 
-        let repo = open_git_repo(path).map_err(|e| format!("打开仓库失败: {}", e))?;
+        let repo = Repository::open(path).map_err(|e| format!("打开仓库失败: {}", e))?;
 
         // 针对不同状态使用不同策略
         match status.as_str() {
@@ -459,7 +462,7 @@ pub async fn git_discard_file(
             return Err("path_not_found".to_string());
         }
 
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
         match status.as_str() {
             "U" | "??" => Err("untracked_not_supported".to_string()),
@@ -478,7 +481,9 @@ pub async fn git_discard_file(
                 // M / D / R：先取消暂存（若有），再强制 checkout HEAD 还原工作区。
                 if let Ok(commit) = repo.head().and_then(|h| h.peel_to_commit()) {
                     // reset_default 失败不致命（文件可能本就未暂存），仅记录。
-                    if let Err(e) = repo.reset_default(Some(commit.as_object()), [file_path.as_str()]) {
+                    if let Err(e) =
+                        repo.reset_default(Some(commit.as_object()), [file_path.as_str()])
+                    {
                         log::warn!("[git_discard_file] reset_default 跳过: {e}");
                     }
                 }
@@ -589,7 +594,11 @@ fn build_reverse_hunk_patch(diff_text: &str, hunk_index: usize) -> Result<String
     }
 
     if hunk_index >= hunks.len() {
-        return Err(format!("hunk_index_out_of_range:{}:{}", hunk_index, hunks.len()));
+        return Err(format!(
+            "hunk_index_out_of_range:{}:{}",
+            hunk_index,
+            hunks.len()
+        ));
     }
 
     let reversed = reverse_hunk(&hunks[hunk_index])?;
@@ -611,7 +620,7 @@ fn apply_patch_to_workdir(project_path: &str, reverse_patch: &str) -> Result<(),
     if !path.exists() {
         return Err("path_not_found".to_string());
     }
-    let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+    let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
     let diff = git2::Diff::from_buffer(reverse_patch.as_bytes())
         .map_err(|e| format!("parse_patch_failed: {e}"))?;
@@ -749,7 +758,10 @@ fn reverse_hunk_lines(
 
 /// 从完整 unified diff 文本构造行级反向 patch：仅回滚 `selected` 中的行。
 /// 跨多个 hunk 的选择逐 hunk 处理并合并；无选中行的 hunk 跳过。纯函数，便于单测。
-fn build_reverse_lines_patch(diff_text: &str, selected: &[(String, u32)]) -> Result<String, String> {
+fn build_reverse_lines_patch(
+    diff_text: &str,
+    selected: &[(String, u32)],
+) -> Result<String, String> {
     let sel: std::collections::HashSet<(String, u32)> = selected.iter().cloned().collect();
 
     let lines: Vec<&str> = diff_text.split('\n').collect();
@@ -835,17 +847,21 @@ pub async fn git_stage_file(project_path: String, file_path: String) -> Result<(
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         let rel = Path::new(&file_path);
         if path.join(&file_path).exists() {
-            index.add_path(rel).map_err(|e| format!("stage_failed: {e}"))?;
+            index
+                .add_path(rel)
+                .map_err(|e| format!("stage_failed: {e}"))?;
         } else {
             index
                 .remove_path(rel)
                 .map_err(|e| format!("stage_remove_failed: {e}"))?;
         }
-        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        index
+            .write()
+            .map_err(|e| format!("index_write_failed: {e}"))?;
         Ok(())
     })
     .await
@@ -861,7 +877,7 @@ pub async fn git_unstage_file(project_path: String, file_path: String) -> Result
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         match repo.head().and_then(|h| h.peel_to_commit()) {
             Ok(commit) => {
                 repo.reset_default(Some(commit.as_object()), [file_path.as_str()])
@@ -873,7 +889,9 @@ pub async fn git_unstage_file(project_path: String, file_path: String) -> Result
                 index
                     .remove_path(Path::new(&file_path))
                     .map_err(|e| format!("unstage_remove_failed: {e}"))?;
-                index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+                index
+                    .write()
+                    .map_err(|e| format!("index_write_failed: {e}"))?;
             }
         }
         Ok(())
@@ -890,7 +908,7 @@ pub async fn git_stage_all(project_path: String) -> Result<(), String> {
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         index
             .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
@@ -898,7 +916,9 @@ pub async fn git_stage_all(project_path: String) -> Result<(), String> {
         index
             .update_all(["*"], None)
             .map_err(|e| format!("stage_all_update_failed: {e}"))?;
-        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        index
+            .write()
+            .map_err(|e| format!("index_write_failed: {e}"))?;
         Ok(())
     })
     .await
@@ -913,7 +933,7 @@ pub async fn git_unstage_all(project_path: String) -> Result<(), String> {
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         match repo.head().and_then(|h| h.peel_to_tree()) {
             Ok(tree) => {
@@ -922,10 +942,14 @@ pub async fn git_unstage_all(project_path: String) -> Result<(), String> {
                     .map_err(|e| format!("unstage_all_failed: {e}"))?;
             }
             Err(_) => {
-                index.clear().map_err(|e| format!("index_clear_failed: {e}"))?;
+                index
+                    .clear()
+                    .map_err(|e| format!("index_clear_failed: {e}"))?;
             }
         }
-        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        index
+            .write()
+            .map_err(|e| format!("index_write_failed: {e}"))?;
         Ok(())
     })
     .await
@@ -943,19 +967,23 @@ pub async fn git_stage_paths(project_path: String, paths: Vec<String>) -> Result
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         for p in &paths {
             let rel = Path::new(p);
             if path.join(p).exists() {
-                index.add_path(rel).map_err(|e| format!("stage_failed: {e}"))?;
+                index
+                    .add_path(rel)
+                    .map_err(|e| format!("stage_failed: {e}"))?;
             } else {
                 index
                     .remove_path(rel)
                     .map_err(|e| format!("stage_remove_failed: {e}"))?;
             }
         }
-        index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+        index
+            .write()
+            .map_err(|e| format!("index_write_failed: {e}"))?;
         Ok(())
     })
     .await
@@ -973,7 +1001,7 @@ pub async fn git_unstage_paths(project_path: String, paths: Vec<String>) -> Resu
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
         match repo.head().and_then(|h| h.peel_to_commit()) {
             Ok(commit) => {
                 repo.reset_default(Some(commit.as_object()), paths.iter().map(|s| s.as_str()))
@@ -986,7 +1014,9 @@ pub async fn git_unstage_paths(project_path: String, paths: Vec<String>) -> Resu
                         .remove_path(Path::new(p))
                         .map_err(|e| format!("unstage_remove_failed: {e}"))?;
                 }
-                index.write().map_err(|e| format!("index_write_failed: {e}"))?;
+                index
+                    .write()
+                    .map_err(|e| format!("index_write_failed: {e}"))?;
             }
         }
         Ok(())
@@ -1007,7 +1037,7 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
         let mut index = repo.index().map_err(|e| format!("index_failed: {e}"))?;
         let tree_oid = index
@@ -1036,7 +1066,9 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
             .find_tree(tree_oid)
             .map_err(|e| format!("find_tree_failed: {e}"))?;
         // 读取 user.name / user.email；缺失给出明确错误供前端引导配置。
-        let sig = repo.signature().map_err(|_| "no_git_identity".to_string())?;
+        let sig = repo
+            .signature()
+            .map_err(|_| "no_git_identity".to_string())?;
         let parents: Vec<&git2::Commit> = head_commit.as_ref().map(|c| vec![c]).unwrap_or_default();
 
         let oid = repo
@@ -1078,7 +1110,10 @@ pub async fn git_commit_paths(
             Ok(_) => run_git_cli(&project_path, &["rev-parse", "--short", "HEAD"]),
             Err(e) => {
                 let low = e.to_lowercase();
-                if low.contains("who you are") || low.contains("identity") || low.contains("user.email") {
+                if low.contains("who you are")
+                    || low.contains("identity")
+                    || low.contains("user.email")
+                {
                     Err("no_git_identity".to_string())
                 } else if low.contains("nothing to commit") || low.contains("no changes added") {
                     Err("nothing_staged".to_string())
@@ -1123,7 +1158,7 @@ pub async fn git_branch_status(project_path: String) -> Result<GitBranchStatus, 
         if !path.exists() {
             return Err("path_not_found".to_string());
         }
-        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
 
         // 进行中的合并/变基（git2 仓库状态）。变基期间 HEAD 通常 detached，
         // 需在 detached 早返回前计算，避免漏报。
@@ -1355,7 +1390,11 @@ fn run_git_conflict_aware(project_path: &str, args: &[&str]) -> Result<String, S
         || combined.contains("needs merge")
         || combined.contains("fix conflicts")
     {
-        let snippet: String = format!("{stdout}{stderr}").trim().chars().take(300).collect();
+        let snippet: String = format!("{stdout}{stderr}")
+            .trim()
+            .chars()
+            .take(300)
+            .collect();
         return Err(format!("pull_conflict: {snippet}"));
     }
     Err(map_git_cli_error(&stderr))
@@ -1383,7 +1422,7 @@ pub async fn git_pull_abort(project_path: String) -> Result<String, String> {
             return Err("path_not_found".to_string());
         }
         let rebasing = {
-            let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+            let repo = Repository::open(path).map_err(|e| format!("open_repo_failed: {e}"))?;
             matches!(
                 repo.state(),
                 git2::RepositoryState::Rebase

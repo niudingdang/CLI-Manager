@@ -418,9 +418,15 @@ function App() {
   useEffect(() => {
     if (!IN_TAURI) return;
     const unlistenHook = listen<CliHookPayload>("claude-hook-notification", (event) => {
-      // SubagentStart：开/更新子 Agent 转录分屏，独立于 Tab 状态机与 toast。
-      if (event.payload.event === "SubagentStart") {
+      // SubagentStart / AgentToolStart：开/更新子 Agent 转录分屏，独立于 Tab 状态机与 toast。
+      if (event.payload.event === "SubagentStart" || event.payload.event === "AgentToolStart") {
         void useTerminalStore.getState().openSubagentTranscript(event.payload);
+        return;
+      }
+      if (event.payload.event === "AgentToolStop") {
+        void useTerminalStore.getState().openSubagentTranscript(event.payload).finally(() => {
+          useTerminalStore.getState().finishSubagentTranscript(event.payload);
+        });
         return;
       }
       if (event.payload.event === "SubagentStop") {

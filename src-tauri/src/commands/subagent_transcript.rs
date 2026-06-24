@@ -48,7 +48,12 @@ impl SubagentTranscriptBridge {
     }
 
     /// 订阅一个转录文件并开始 tail。替换同 key 的旧订阅。路径为空返回错误。
-    pub fn subscribe(&self, app_handle: AppHandle, key: String, path: String) -> Result<(), String> {
+    pub fn subscribe(
+        &self,
+        app_handle: AppHandle,
+        key: String,
+        path: String,
+    ) -> Result<(), String> {
         if path.trim().is_empty() {
             return Err("empty_transcript_path".to_string());
         }
@@ -57,7 +62,10 @@ impl SubagentTranscriptBridge {
 
         let stop = Arc::new(AtomicBool::new(false));
         {
-            let mut guard = self.entries.lock().map_err(|_| "lock_poisoned".to_string())?;
+            let mut guard = self
+                .entries
+                .lock()
+                .map_err(|_| "lock_poisoned".to_string())?;
             guard.insert(key.clone(), stop.clone());
         }
 
@@ -104,7 +112,11 @@ fn tail_loop(app_handle: AppHandle, key: String, path: String, stop: Arc<AtomicB
 /// 返回 `(完整行内容, 新 offset, 是否因文件变短而重置)`；无新完整行时返回 None。
 fn read_new_lines(path: &Path, offset: u64) -> Option<(String, u64, bool)> {
     let len = fs::metadata(path).ok()?.len();
-    let (start, shrank) = if len < offset { (0u64, true) } else { (offset, false) };
+    let (start, shrank) = if len < offset {
+        (0u64, true)
+    } else {
+        (offset, false)
+    };
     if len <= start {
         return None;
     }
@@ -118,14 +130,24 @@ fn read_new_lines(path: &Path, offset: u64) -> Option<(String, u64, bool)> {
     let last_nl = buf.iter().rposition(|&b| b == b'\n')?;
     let complete = &buf[..=last_nl];
     let consumed = start + complete.len() as u64;
-    Some((String::from_utf8_lossy(complete).to_string(), consumed, shrank))
+    Some((
+        String::from_utf8_lossy(complete).to_string(),
+        consumed,
+        shrank,
+    ))
 }
 
 /// cwd → Claude projects 目录 slug：把 `:`、`\`、`/` 全部替换为 `-`，其余保留。
 /// 例：`D:\work\pythonProject\CLI-Manager` → `D--work-pythonProject-CLI-Manager`。
 fn slug_for_cwd(cwd: &str) -> String {
     cwd.chars()
-        .map(|c| if matches!(c, ':' | '\\' | '/') { '-' } else { c })
+        .map(|c| {
+            if matches!(c, ':' | '\\' | '/') {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -201,6 +223,42 @@ pub async fn subagent_transcript_unsubscribe(
     Ok(())
 }
 
+/// 扫描 subagents 目录，返回发现的 agent-*.jsonl 文件列表（仅文件名，不含路径）。
+/// 用于 AgentToolStart fallback：当 hook payload 缺少 agentId 时，前端短时轮询此命令发现新 child。
+#[tauri::command]
+pub async fn subagent_transcript_discover(
+    cwd: String,
+    session_id: String,
+) -> Result<Vec<String>, String> {
+    let home = home_dir().ok_or_else(|| "no_home_dir".to_string())?;
+    let subagents_dir = home
+        .join(".claude")
+        .join("projects")
+        .join(slug_for_cwd(&cwd))
+        .join(session_id)
+        .join("subagents");
+
+    if !subagents_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let entries = std::fs::read_dir(&subagents_dir).map_err(|e| e.to_string())?;
+    let mut agent_files = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("agent-") && name.ends_with(".jsonl") {
+                    agent_files.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(agent_files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,12 +276,8 @@ mod tests {
     #[test]
     fn derive_builds_subagent_jsonl_path() {
         let home = Path::new(r"C:\Users\me");
-        let path = derive_transcript_path(
-            home,
-            r"D:\work\pythonProject\CLI-Manager",
-            "sess-1",
-            "a99",
-        );
+        let path =
+            derive_transcript_path(home, r"D:\work\pythonProject\CLI-Manager", "sess-1", "a99");
         let norm = path.replace('\\', "/");
         assert!(
             norm.ends_with(
@@ -235,8 +289,8 @@ mod tests {
 
     #[test]
     fn resolve_prefers_explicit_transcript_path() {
-        let got = resolve_transcript_path(Some("  /tmp/a.jsonl ".to_string()), None, None, None)
-            .unwrap();
+        let got =
+            resolve_transcript_path(Some("  /tmp/a.jsonl ".to_string()), None, None, None).unwrap();
         assert_eq!(got, "/tmp/a.jsonl");
     }
 

@@ -18,7 +18,7 @@ pub struct ClaudeHookBridge {
     token: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaudeHookRequest {
     tab_id: String,
@@ -31,6 +31,7 @@ struct ClaudeHookRequest {
     timestamp: Option<String>,
     // 仅 SubagentStart 等子 Agent 事件携带：用于定位子 Agent 转录 jsonl。
     agent_id: Option<String>,
+    tool_use_id: Option<String>,
     agent_type: Option<String>,
     agent_transcript_path: Option<String>,
     transcript_path: Option<String>,
@@ -48,6 +49,7 @@ pub struct ClaudeHookPayload {
     cwd: Option<String>,
     timestamp: Option<String>,
     agent_id: Option<String>,
+    tool_use_id: Option<String>,
     agent_type: Option<String>,
     agent_transcript_path: Option<String>,
     transcript_path: Option<String>,
@@ -141,6 +143,8 @@ fn handle_stream(mut stream: TcpStream, app_handle: AppHandle, token: &str) {
         return;
     }
 
+    log_hook_payload_diagnostic(&payload);
+
     let payload = ClaudeHookPayload {
         tab_id: payload.tab_id,
         source: normalize_source(payload.source.as_deref()).to_string(),
@@ -151,6 +155,7 @@ fn handle_stream(mut stream: TcpStream, app_handle: AppHandle, token: &str) {
         cwd: payload.cwd,
         timestamp: payload.timestamp,
         agent_id: payload.agent_id,
+        tool_use_id: payload.tool_use_id,
         agent_type: payload.agent_type,
         agent_transcript_path: payload.agent_transcript_path,
         transcript_path: payload.transcript_path,
@@ -259,6 +264,8 @@ fn is_valid_payload(payload: &ClaudeHookRequest) -> bool {
                 | "StopFailure"
                 | "SubagentStart"
                 | "SubagentStop"
+                | "AgentToolStart"
+                | "AgentToolStop"
         ),
         "codex" => matches!(
             payload.event.as_str(),
@@ -270,6 +277,48 @@ fn is_valid_payload(payload: &ClaudeHookRequest) -> bool {
                 | "SubagentStop"
         ),
         _ => false,
+    }
+}
+
+fn log_hook_payload_diagnostic(payload: &ClaudeHookRequest) {
+    if !matches!(
+        payload.event.as_str(),
+        "SubagentStart" | "SubagentStop" | "AgentToolStart" | "AgentToolStop" | "Notification"
+    ) {
+        return;
+    }
+
+    info!(
+        "cli hook payload diagnostic: source={} event={} tabId={} sessionId={:?} agentId={:?} toolUseId={:?} agentType={:?} hasAgentTranscriptPath={} hasTranscriptPath={} cwd={:?}",
+        normalize_source(payload.source.as_deref()),
+        payload.event,
+        payload.tab_id,
+        payload.session_id,
+        payload.agent_id,
+        payload.tool_use_id,
+        payload.agent_type,
+        payload
+            .agent_transcript_path
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+        payload
+            .transcript_path
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+        payload.cwd,
+    );
+
+    // AgentTool 事件详细诊断：记录完整 payload JSON 以定位 Claude Code 实际字段。
+    if matches!(
+        payload.event.as_str(),
+        "AgentToolStart" | "AgentToolStop"
+    ) {
+        if let Ok(full_json) = serde_json::to_string_pretty(payload) {
+            info!(
+                "[agent_tool_diagnostic] {} full payload:\n{}",
+                payload.event, full_json
+            );
+        }
     }
 }
 
