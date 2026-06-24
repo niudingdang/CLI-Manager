@@ -12,6 +12,37 @@
 
 ## Component Structure
 
+### Convention: User-facing app shell text goes through `useI18n`
+
+**What**: New user-facing labels, aria labels, tooltips, settings titles, and app-shell messages should use `src/lib/i18n.ts` through `useI18n()` instead of hard-coded Chinese/English strings. Persisted language preference lives in `settingsStore.language` as `"auto" | "zh-CN" | "en-US"`.
+
+**Why**: Language switching must be consistent across visible shell UI. Keeping translation keys in one local module avoids adding an i18n dependency while the app only supports Simplified Chinese and English.
+
+**Correct**:
+
+```tsx
+import { useI18n } from "../lib/i18n";
+
+const { t } = useI18n();
+
+<button aria-label={t("sidebar.openSettings")}>{t("sidebar.settings")}</button>
+```
+
+**Wrong**:
+
+```tsx
+<button aria-label="打开设置">设置</button>
+```
+
+**Contracts**:
+
+- Use `language: "auto"` as the default; resolve it from WebView/browser locale.
+- Set document language from the resolved language in `App`.
+- Add both `zh-CN` and `en-US` entries for every new translation key.
+- Do not introduce a third-party i18n library without an explicit dependency-change decision.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`; manually verify Settings > General language switching changes app-shell labels and persists after restart.
+
 ### Convention: Markdown rendering goes through the shared MarkdownContent component
 
 **What**: Any UI that renders user/session/release Markdown must use `src/components/ui/MarkdownContent.tsx`. Do not import `react-markdown` directly from feature components.
