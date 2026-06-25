@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -23,6 +24,10 @@ interface GitChangesPanelProps {
 // 降级慢轮询间隔：仅当 fs-watcher 初始化失败（网络盘/WSL 等 notify 不可用）时启用。
 const FALLBACK_POLL_INTERVAL_MS = 15000;
 const FILTER_LABEL_HIDE_WIDTH = 260;
+const TERMINAL_PANEL_SCROLLBAR_STYLE = {
+  "--ui-scrollbar-thumb": TERM.border,
+  "--ui-scrollbar-track": TERM.bg,
+} as CSSProperties;
 
 // 把后端 git 网络错误码（形如 "auth_failed: <原文>"）映射为可读中文 toast。
 function formatGitNetError(prefix: string, raw: string): string {
@@ -380,7 +385,7 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
   return (
     <Container
       className={panelClassName}
-      style={{ backgroundColor: TERM.bg }}
+      style={{ backgroundColor: TERM.bg, ...TERMINAL_PANEL_SCROLLBAR_STYLE }}
     >
       {/* Header */}
       <div className="flex items-center justify-between gap-2 border-b px-2 py-1.5" style={{ borderColor: TERM.dim }}>

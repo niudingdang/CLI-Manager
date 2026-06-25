@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { FolderGit2, GitBranch, RefreshCw, FolderOpen } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import type { HistorySessionDetail, HistorySource } from "../../lib/types";
@@ -34,6 +35,10 @@ interface TerminalStatsPanelProps {
 
 const POLL_INTERVAL_MS = 10_000;
 const TICK_INTERVAL_MS = 30_000;
+const TERMINAL_PANEL_SCROLLBAR_STYLE = {
+  "--ui-scrollbar-thumb": TERM.border,
+  "--ui-scrollbar-track": TERM.bg,
+} as CSSProperties;
 
 // 按作用域（含 tabId）缓存已解析的会话详情：切回已看过的 Tab 先显缓存再后台刷新，
 // 避免重复解析 jsonl 时的「加载中」闪烁。终端数量有限，不做淘汰。
@@ -367,7 +372,7 @@ export function TerminalStatsPanel({ activeSessionId, open, visible = true, embe
   return (
     <Container
       className={containerClassName}
-      style={{ backgroundColor: TERM.bg }}
+      style={{ backgroundColor: TERM.bg, ...TERMINAL_PANEL_SCROLLBAR_STYLE }}
     >
       <div className="flex items-center justify-between px-1 py-0.5">
         <span className="flex items-center gap-2 text-[11px] font-bold" style={{ color: TERM.fg }}>
