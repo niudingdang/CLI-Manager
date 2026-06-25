@@ -185,15 +185,18 @@ function formatCliToolLabel(value: string | null | undefined): string {
 
 function formatShellLabel(value: string | null | undefined): string {
   const trimmed = value?.trim();
-  if (!trimmed) return "PowerShell";
+  if (!trimmed) return "默认 Shell";
 
   const normalized = trimmed.toLowerCase();
-  if (normalized === "powershell") return "PowerShell";
-  if (normalized === "pwsh") return "PowerShell 7";
+  if (normalized === "powershell" || normalized === "powershell.exe") return "PowerShell";
+  if (normalized === "pwsh" || normalized === "pwsh.exe") return "PowerShell 7";
   if (normalized === "cmd") return "CMD";
   if (normalized === "wsl") return "WSL";
   if (normalized === "git-bash" || normalized === "git bash" || normalized === "gitbash") return "Git Bash";
   if (normalized === "bash") return "Bash";
+  if (normalized === "zsh") return "Zsh";
+  if (normalized === "fish") return "Fish";
+  if (normalized === "sh") return "sh";
   return trimmed;
 }
 
@@ -218,7 +221,7 @@ function buildTerminalTabHoverInfo(session: TerminalSession, project?: Project):
   return {
     name: session.title.trim() || "Terminal",
     cli: formatCliToolLabel(project?.cli_tool),
-    shell: formatShellLabel(session.shell ?? project?.shell ?? "powershell"),
+    shell: formatShellLabel(session.shell ?? project?.shell),
     project: project?.name.trim() || "\u672a\u7ed1\u5b9a\u9879\u76ee",
     path: session.cwd?.trim() || project?.path.trim() || "-",
     sessionId: session.cliSessionId?.trim() || session.id,

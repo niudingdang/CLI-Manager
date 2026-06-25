@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getDb, batchUpdateSortOrder } from "../lib/db";
 import { useSettingsStore } from "./settingsStore";
 import { logWarn } from "../lib/logger";
+import { defaultShellForOs, getOsPlatform, normalizeShellForOs } from "../lib/shell";
 import type {
   Project, CreateProjectInput, UpdateProjectInput,
   Group, CreateGroupInput, TreeNode,
@@ -199,6 +200,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const db = await getDb();
     const id = crypto.randomUUID();
     const ts = Date.now().toString();
+    const os = await getOsPlatform();
+    const shell = normalizeShellForOs(input.shell, os) ?? defaultShellForOs(os);
     const project: Project = {
       id,
       name: input.name,
@@ -209,7 +212,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       cli_tool: input.cli_tool ?? "",
       startup_cmd: input.startup_cmd ?? "",
       env_vars: input.env_vars ?? "{}",
-      shell: input.shell ?? "powershell",
+      shell,
       created_at: ts,
       updated_at: ts,
     };

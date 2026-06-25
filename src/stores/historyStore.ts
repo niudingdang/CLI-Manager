@@ -640,7 +640,7 @@ function makeSessionKey(source: HistorySource, sessionId: string, filePath: stri
 }
 
 function normalizeMetaPath(path: string): string {
-  return path.replace(/\\/g, "/").toLowerCase();
+  return path.replace(/\\/g, "/");
 }
 
 function makeStatsProjectOptionsCacheKey(

@@ -905,7 +905,7 @@ pub async fn history_list_prompts(
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
         let target_file = file_path
-            .map(|v| v.trim().replace('\\', "/").to_lowercase())
+            .map(|v| normalize_history_path(&v))
             .filter(|v| !v.is_empty());
         let normalized_query = query
             .map(|q| q.trim().to_lowercase())
@@ -931,7 +931,7 @@ pub async fn history_list_prompts(
                 let Some(target) = target_file.as_ref() else {
                     continue;
                 };
-                let current = path_to_key(&file_ref.path).to_lowercase();
+                let current = normalize_history_path(&path_to_key(&file_ref.path));
                 if &current != target {
                     continue;
                 }
@@ -2811,9 +2811,20 @@ fn is_jsonl(path: &Path) -> bool {
 }
 
 fn detect_home_dir() -> Option<PathBuf> {
-    env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(PathBuf::from))
+    #[cfg(target_os = "windows")]
+    {
+        env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").filter(|value| !value.is_empty()).map(PathBuf::from))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("USERPROFILE").filter(|value| !value.is_empty()).map(PathBuf::from))
+    }
 }
 
 fn path_to_key(path: &Path) -> String {
@@ -2821,10 +2832,13 @@ fn path_to_key(path: &Path) -> String {
 }
 
 fn normalize_history_path(path: &str) -> String {
-    path.trim()
-        .replace('\\', "/")
-        .trim_end_matches('/')
-        .to_lowercase()
+    let normalized = path.trim().replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/').to_string();
+    if cfg!(target_os = "windows") {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    }
 }
 
 fn claude_project_key_from_path(path: &str) -> String {

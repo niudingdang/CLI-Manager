@@ -66,14 +66,17 @@ function inferHistorySource(haystack: string): HistorySource | null {
 
 function formatStatsShellLabel(value: string | null | undefined): string {
   const trimmed = value?.trim();
-  if (!trimmed) return "PowerShell";
+  if (!trimmed) return "默认 Shell";
   const normalized = trimmed.toLowerCase();
-  if (normalized === "powershell") return "PowerShell";
-  if (normalized === "pwsh") return "PowerShell 7";
+  if (normalized === "powershell" || normalized === "powershell.exe") return "PowerShell";
+  if (normalized === "pwsh" || normalized === "pwsh.exe") return "PowerShell 7";
   if (normalized === "cmd") return "CMD";
   if (normalized === "wsl") return "WSL";
   if (normalized === "gitbash" || normalized === "git-bash" || normalized === "git bash") return "Git Bash";
   if (normalized === "bash") return "Bash";
+  if (normalized === "zsh") return "Zsh";
+  if (normalized === "fish") return "Fish";
+  if (normalized === "sh") return "sh";
   return trimmed;
 }
 
@@ -394,7 +397,7 @@ export function TerminalStatsPanel({ activeSessionId, open, visible = true, embe
   if (!panelActive) return null;
 
   const projectName = project?.name || latestSession?.project_key || "—";
-  const shellLabel = formatStatsShellLabel(terminalSession?.shell ?? project?.shell ?? "powershell");
+  const shellLabel = formatStatsShellLabel(terminalSession?.shell ?? project?.shell);
 
   // 未绑定 hook 会话时，4 张会话级卡片照常渲染但数据置空（保留图形骨架）
   const boundSession = tokensBound ? latestSession : null;

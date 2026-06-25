@@ -3,7 +3,7 @@ import { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 import { resolveAutoTerminalThemeId } from "../lib/terminalThemes";
 import { backgroundImageExists } from "../lib/assetUrl";
-import { getDefaultShellForPlatform } from "../lib/shell";
+import { defaultShellForOs, getOsPlatform, isWindowsOnlyShellKey } from "../lib/shell";
 
 export type ThemeMode = "dark" | "light" | "system";
 export type LightThemePalette =
@@ -582,12 +582,19 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         : DEFAULTS.terminalSidePanelMerged;
     entries.terminalBackground = migrateTerminalBackground(entries.terminalBackground);
 
-    // 默认 Shell：用户从未设置过时，根据操作系统选择合适的默认值
-    // （DEFAULTS.defaultShell 是 Windows 的 powershell.exe，在 mac/linux 上不合适）
-    if (entries.defaultShell === undefined) {
-      try {
-        entries.defaultShell = await getDefaultShellForPlatform();
-      } catch {
+    // 默认 Shell：非 Windows 上迁移旧 Windows-only 默认值，避免 macOS/Linux 继续显示或启动 powershell.exe。
+    try {
+      const os = await getOsPlatform();
+      const platformDefaultShell = defaultShellForOs(os);
+      const currentDefaultShell = typeof entries.defaultShell === "string" ? entries.defaultShell.trim() : "";
+      if (!currentDefaultShell || (os !== "windows" && isWindowsOnlyShellKey(currentDefaultShell))) {
+        entries.defaultShell = platformDefaultShell;
+        await s.set("defaultShell", platformDefaultShell);
+      } else {
+        entries.defaultShell = currentDefaultShell;
+      }
+    } catch {
+      if (entries.defaultShell === undefined) {
         entries.defaultShell = DEFAULTS.defaultShell;
       }
     }
