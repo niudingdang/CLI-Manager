@@ -4,6 +4,7 @@ use std::path::Path;
 use tauri::{AppHandle, State};
 
 use crate::git_watcher::GitWatcherBridge;
+use crate::shell_resolver::silent_command;
 
 const GIT_DIFF_LINE_STATS_STATUS_LIMIT: usize = 500;
 const GIT_DIFF_LINE_STATS_LINE_LIMIT: usize = 200_000;
@@ -113,6 +114,10 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
 
     tokio::task::spawn_blocking(move || {
         let started_at = std::time::Instant::now();
+        if let Some((distro, linux_path)) = crate::wsl::parse_wsl_unc_path(&project_path) {
+            return git_get_changes_wsl(&project_path, &distro, &linux_path, started_at);
+        }
+
         let path = Path::new(&project_path);
 
         if !path.exists() {
@@ -204,6 +209,184 @@ pub async fn git_get_changes(project_path: String) -> Result<Vec<GitFileChange>,
         log::error!("[git_get_changes] {}", err_msg);
         err_msg
     })?
+}
+
+fn git_get_changes_wsl(
+    project_path: &str,
+    distro: &str,
+    linux_path: &str,
+    started_at: std::time::Instant,
+) -> Result<Vec<GitFileChange>, String> {
+    log::info!(
+        "[git_get_changes:wsl] 检测到 WSL UNC 路径, 使用 wsl.exe git 热路径: project_path={} distro={} linux_path={}",
+        project_path,
+        distro,
+        linux_path
+    );
+
+    let status_started_at = std::time::Instant::now();
+    let status_stdout = run_wsl_git(
+        distro,
+        linux_path,
+        &["status", "--porcelain=v1", "-z", "-uall"],
+    )
+    .map_err(|e| {
+        let err_msg = format!("获取 WSL Git 状态失败: {e}");
+        log::error!("[git_get_changes:wsl] {}", err_msg);
+        err_msg
+    })?;
+    let mut changes = parse_wsl_git_status(&status_stdout);
+
+    log::info!(
+        "[git_get_changes:wsl] 获取到 {} 个状态条目 status_elapsed_ms={}",
+        changes.len(),
+        status_started_at.elapsed().as_millis()
+    );
+
+    let skipped_line_stats = should_skip_diff_line_stats(changes.len());
+    let stats = if skipped_line_stats {
+        log::warn!(
+            "[git_get_changes:wsl] 状态条目过多({}), 跳过行数统计以避免面板长时间 loading",
+            changes.len()
+        );
+        std::collections::HashMap::new()
+    } else {
+        match compute_wsl_diff_line_stats(distro, linux_path) {
+            Ok(stats) => stats,
+            Err(e) => {
+                log::warn!("[git_get_changes:wsl] diff 行数统计降级为 0: {e}");
+                std::collections::HashMap::new()
+            }
+        }
+    };
+
+    for change in &mut changes {
+        if let Some((added, deleted)) = stats.get(&normalize_path(&change.path)).copied() {
+            change.added = added;
+            change.deleted = deleted;
+        }
+    }
+
+    log::info!(
+        "[git_get_changes:wsl] 查询完成，返回 {} 个变更文件 line_stats={} elapsed_ms={}",
+        changes.len(),
+        if skipped_line_stats { "skipped" } else { "computed" },
+        started_at.elapsed().as_millis()
+    );
+    Ok(changes)
+}
+
+fn run_wsl_git(distro: &str, linux_path: &str, git_args: &[&str]) -> Result<Vec<u8>, String> {
+    let program = crate::wsl::find_wsl_exe()
+        .as_deref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "wsl.exe".to_string());
+
+    let mut cmd = silent_command(&program);
+    cmd.args(["-d", distro, "--exec", "git", "-C", linux_path]);
+    cmd.args(git_args);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("spawn_failed: {e}"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let snippet = format!("{stderr}{stdout}")
+        .trim()
+        .chars()
+        .take(300)
+        .collect::<String>();
+    Err(format!(
+        "wsl_git_failed(exit={}): {}",
+        output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        snippet
+    ))
+}
+
+fn parse_wsl_git_status(stdout: &[u8]) -> Vec<GitFileChange> {
+    let records: Vec<&[u8]> = stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .collect();
+    let mut changes = Vec::new();
+    let mut index = 0usize;
+
+    while index < records.len() {
+        let record = records[index];
+        index += 1;
+
+        if record.len() < 4 {
+            continue;
+        }
+
+        let x = record[0];
+        let y = record[1];
+        let path_bytes = if record[2] == b' ' {
+            &record[3..]
+        } else {
+            &record[2..]
+        };
+        let path = normalize_path(&String::from_utf8_lossy(path_bytes));
+        if path.is_empty() {
+            continue;
+        }
+
+        let (status, staged) = parse_porcelain_status(x, y);
+        changes.push(GitFileChange {
+            path,
+            status: status.to_string(),
+            staged,
+            added: 0,
+            deleted: 0,
+        });
+
+        // `git status -z` emits an extra old path record after renamed/copied entries.
+        if x == b'R' || x == b'C' {
+            index = index.saturating_add(1);
+        }
+    }
+
+    changes
+}
+
+fn parse_porcelain_status(x: u8, y: u8) -> (&'static str, bool) {
+    if is_porcelain_conflict(x, y) {
+        return ("C", false);
+    }
+    if x == b'?' && y == b'?' {
+        return ("U", false);
+    }
+    if x != b' ' {
+        return (map_porcelain_status_byte(x), true);
+    }
+    if y != b' ' {
+        return (map_porcelain_status_byte(y), false);
+    }
+    ("M", false)
+}
+
+fn is_porcelain_conflict(x: u8, y: u8) -> bool {
+    x == b'U'
+        || y == b'U'
+        || (x == b'A' && y == b'A')
+        || (x == b'D' && y == b'D')
+}
+
+fn map_porcelain_status_byte(status: u8) -> &'static str {
+    match status {
+        b'A' => "A",
+        b'D' => "D",
+        b'R' => "R",
+        _ => "M",
+    }
 }
 
 fn parse_git2_status(status: git2::Status) -> (&'static str, bool) {
@@ -325,6 +508,55 @@ fn compute_diff_line_stats(repo: &Repository) -> std::collections::HashMap<Strin
     );
 
     map
+}
+
+fn compute_wsl_diff_line_stats(
+    distro: &str,
+    linux_path: &str,
+) -> Result<std::collections::HashMap<String, (i32, i32)>, String> {
+    let started_at = std::time::Instant::now();
+    let stdout = run_wsl_git(distro, linux_path, &["diff", "--numstat", "-z", "HEAD", "--"])?;
+    let stats = parse_wsl_numstat(&stdout);
+    log::info!(
+        "[git_get_changes:wsl] diff numstat 完成 files={} elapsed_ms={}",
+        stats.len(),
+        started_at.elapsed().as_millis()
+    );
+    Ok(stats)
+}
+
+fn parse_wsl_numstat(stdout: &[u8]) -> std::collections::HashMap<String, (i32, i32)> {
+    use std::collections::HashMap;
+
+    let mut map = HashMap::new();
+    for record in stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let text = String::from_utf8_lossy(record);
+        let mut parts = text.splitn(3, '\t');
+        let Some(added) = parts.next().and_then(parse_numstat_count) else {
+            continue;
+        };
+        let Some(deleted) = parts.next().and_then(parse_numstat_count) else {
+            continue;
+        };
+        let Some(path) = parts.next() else {
+            continue;
+        };
+        let path = normalize_path(path);
+        if !path.is_empty() {
+            map.insert(path, (added, deleted));
+        }
+    }
+    map
+}
+
+fn parse_numstat_count(value: &str) -> Option<i32> {
+    if value == "-" {
+        return Some(0);
+    }
+    value.parse::<i32>().ok()
 }
 
 /// 获取指定文件的 Git diff 内容
@@ -1519,8 +1751,9 @@ pub async fn git_watch_stop(bridge: State<'_, GitWatcherBridge>) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::{
-        build_reverse_hunk_patch, build_reverse_lines_patch, should_skip_diff_line_stats,
-        validate_repo_relative_path, GIT_DIFF_LINE_STATS_STATUS_LIMIT,
+        build_reverse_hunk_patch, build_reverse_lines_patch, parse_wsl_git_status,
+        parse_wsl_numstat, should_skip_diff_line_stats, validate_repo_relative_path,
+        GIT_DIFF_LINE_STATS_STATUS_LIMIT,
     };
 
     #[test]
@@ -1535,6 +1768,48 @@ mod tests {
         assert!(should_skip_diff_line_stats(
             GIT_DIFF_LINE_STATS_STATUS_LIMIT + 1
         ));
+    }
+
+    #[test]
+    fn parses_wsl_git_status_basic_entries() {
+        let input = b" M src/main.rs\0M  src/lib.rs\0A  added.txt\0 D deleted.txt\0?? notes/new.md\0";
+        let changes = parse_wsl_git_status(input);
+
+        assert_eq!(changes.len(), 5);
+        assert_eq!(changes[0].path, "src/main.rs");
+        assert_eq!(changes[0].status, "M");
+        assert!(!changes[0].staged);
+        assert_eq!(changes[1].path, "src/lib.rs");
+        assert_eq!(changes[1].status, "M");
+        assert!(changes[1].staged);
+        assert_eq!(changes[2].status, "A");
+        assert!(changes[2].staged);
+        assert_eq!(changes[3].status, "D");
+        assert!(!changes[3].staged);
+        assert_eq!(changes[4].status, "U");
+        assert!(!changes[4].staged);
+    }
+
+    #[test]
+    fn parses_wsl_git_status_rename_and_conflict() {
+        let input = b"R  new/name.rs\0old/name.rs\0UU conflicted.txt\0";
+        let changes = parse_wsl_git_status(input);
+
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].path, "new/name.rs");
+        assert_eq!(changes[0].status, "R");
+        assert!(changes[0].staged);
+        assert_eq!(changes[1].path, "conflicted.txt");
+        assert_eq!(changes[1].status, "C");
+        assert!(!changes[1].staged);
+    }
+
+    #[test]
+    fn parses_wsl_numstat_records() {
+        let stats = parse_wsl_numstat(b"12\t3\tsrc/main.rs\0-\t-\tassets/logo.png\0");
+
+        assert_eq!(stats.get("src/main.rs"), Some(&(12, 3)));
+        assert_eq!(stats.get("assets/logo.png"), Some(&(0, 0)));
     }
 
     #[test]
