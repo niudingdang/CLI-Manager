@@ -7,6 +7,8 @@ import { logError, logInfo, logWarn } from "../lib/logger";
 import { useSettingsStore } from "./settingsStore";
 import { useSessionStore } from "./sessionStore";
 import { normalizeShellKey } from "../lib/shell";
+import { getCodexProviderOverride, isExactCodexProject } from "../lib/providerSwitching";
+import { useProjectStore } from "./projectStore";
 import {
   addSessionToPaneTree,
   collectPaneLeaves,
@@ -645,6 +647,22 @@ function buildPtyEnvVars(envVars?: Record<string, string> | null, shell?: string
   return Object.keys(next).length > 0 ? next : null;
 }
 
+function getCodexProviderLaunchConfig(projectId?: string, startupCmd?: string | null) {
+  if (!projectId) return null;
+  const project = useProjectStore.getState().projects.find((item) => item.id === projectId);
+  if (!project || !isExactCodexProject(project) || project.startup_cmd.trim() || !startupCmd?.trim()) {
+    return null;
+  }
+  const override = getCodexProviderOverride(project);
+  if (!override) return null;
+  const settings = useSettingsStore.getState();
+  return {
+    providerId: override.providerId,
+    dbPath: settings.ccSwitchDbPath ?? undefined,
+    codexConfigDir: settings.codexHookConfigDir ?? undefined,
+  };
+}
+
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -672,6 +690,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         envVars: buildPtyEnvVars(envVars ?? null, resolvedShell),
         shell: resolvedShell,
         hookEnvEnabled: await shouldEnableHookEnv(),
+        codexProvider: getCodexProviderLaunchConfig(projectId, startupCmd),
       });
     } catch (err) {
       const description = String(err);
@@ -975,6 +994,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         envVars: buildPtyEnvVars(options?.envVars ?? null, resolvedShell),
         shell: resolvedShell,
         hookEnvEnabled: await shouldEnableHookEnv(),
+        codexProvider: getCodexProviderLaunchConfig(options?.projectId, options?.startupCmd),
       });
     } catch (err) {
       const description = String(err);
@@ -1217,6 +1237,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           envVars: buildPtyEnvVars(ps.envVars ?? null, resolvedShell),
           shell: resolvedShell,
           hookEnvEnabled: await shouldEnableHookEnv(),
+          codexProvider: getCodexProviderLaunchConfig(ps.projectId, ps.startupCmd),
         });
       } catch (err) {
         logError("Failed to restore session", { session: ps, err });
