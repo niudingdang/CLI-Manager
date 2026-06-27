@@ -25,7 +25,7 @@ export function SettingsTopBar({
     <header className="ui-surface-base ui-glass z-10 border-b border-border px-4 py-3 min-[1280px]:px-6 min-[1280px]:py-4">
       <div className="flex flex-col gap-3 min-[1280px]:flex-row min-[1280px]:items-start min-[1280px]:justify-between min-[1280px]:gap-4">
         <div className="min-w-0">
-          <h2 className="truncate text-lg font-semibold text-on-surface min-[1280px]:text-xl">{title}</h2>
+          <h2 className="truncate text-base font-medium text-on-surface min-[1280px]:text-lg">{title}</h2>
           <p className="mt-1 line-clamp-2 text-xs text-on-surface-variant min-[1280px]:text-sm">{description}</p>
         </div>
         <div className="flex w-full items-center justify-end gap-2 min-[1280px]:w-auto min-[1280px]:shrink-0">

@@ -103,14 +103,13 @@ const TONE_COLOR: Record<Tone, string> = {
   danger: "var(--danger)",
 };
 
-// 供应商页样式：参考 docs/UI「Editorial Analyst」设计，但全部映射到主题 token，
-// 以便在 App 的 18 套主题（9 亮 + 9 暗）与暗色模式下一致工作。
+// 供应商页样式：只保留设置页需要的局部视觉层级，全部映射主题 token。
 const providerPageStyles = `
 .prov-code-block {
   background: var(--surface-container-highest);
   border: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
-  border-radius: 16px;
-  padding: 18px;
+  border-radius: 12px;
+  padding: 14px;
   overflow-y: auto;
   font-family: var(--font-ui-mono);
 }
@@ -137,34 +136,21 @@ const providerPageStyles = `
 [data-theme="light"] .prov-code-block .json-number { color: #098658; }
 [data-theme="light"] .prov-code-block .json-boolean { color: #0000ff; }
 
-/* 详情头部：右上角柔光（参考稿的 primary blur 光晕），用 primary token */
+/* 详情头部：使用普通设置卡片层级 */
 .prov-detail-hero {
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  border-radius: 24px;
+  border-radius: 16px;
   background: var(--surface-container-lowest);
-  outline: 1px solid color-mix(in srgb, var(--border) 14%, transparent);
-}
-.prov-detail-hero::before {
-  content: "";
-  position: absolute;
-  top: -120px;
-  right: -120px;
-  width: 360px;
-  height: 360px;
-  border-radius: 999px;
-  pointer-events: none;
-  z-index: -1;
-  background: radial-gradient(circle, color-mix(in srgb, var(--primary) 12%, transparent), transparent 70%);
-  filter: blur(40px);
+  outline: 1px solid color-mix(in srgb, var(--border) 15%, transparent);
 }
 
 /* 环境变量卡：tonal layering，无硬边框 */
 .prov-env-card {
   background: var(--surface-container-lowest);
-  border-radius: 16px;
-  padding: 14px 16px;
+  border-radius: 12px;
+  padding: 10px 12px;
   outline: 1px solid color-mix(in srgb, var(--border) 12%, transparent);
   transition: outline-color var(--animate-duration-fast), background-color var(--animate-duration-fast);
 }
@@ -173,24 +159,24 @@ const providerPageStyles = `
 }
 .prov-env-key {
   font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  font-weight: 600;
+  letter-spacing: 0;
   text-transform: uppercase;
   color: var(--text-muted);
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
-/* 配置 Tab：底部下划线高亮（editorial），取代 Mantine outline 边框 */
+/* 配置 Tab：轻量下划线高亮 */
 .prov-tab {
   appearance: none;
   background: transparent;
   border: 0;
   border-bottom: 2px solid transparent;
-  padding: 8px 4px;
-  margin-right: 20px;
-  font-weight: 600;
-  font-size: 13px;
+  padding: 6px 2px;
+  margin-right: 16px;
+  font-weight: 500;
+  font-size: 12px;
   color: var(--on-surface-variant);
   cursor: pointer;
   transition: color var(--animate-duration-fast), border-color var(--animate-duration-fast);
@@ -199,6 +185,15 @@ const providerPageStyles = `
 .prov-tab[data-active="true"] {
   color: var(--primary);
   border-bottom-color: var(--primary);
+}
+.prov-soft-button,
+.prov-soft-button .mantine-Button-label {
+  font-weight: 500;
+}
+.prov-detail-hero [class*="font-bold"],
+.prov-provider-list [class*="font-bold"] {
+  font-weight: 500;
+  letter-spacing: 0;
 }
 `;
 
@@ -357,15 +352,15 @@ function ProviderListItem({
       aria-pressed={isSelected}
       className="ui-focus-ring flex w-full items-center gap-3 text-left transition-all"
       style={{
-        padding: "11px 12px",
-        borderRadius: 16,
+        padding: "9px 10px",
+        borderRadius: 12,
         backgroundColor: isSelected
           ? "color-mix(in srgb, var(--primary) 10%, var(--surface-container-lowest))"
           : "var(--surface-container-lowest)",
         border: isSelected
           ? "1px solid color-mix(in srgb, var(--primary) 42%, transparent)"
           : "1px solid color-mix(in srgb, var(--border) 22%, transparent)",
-        boxShadow: isSelected ? "0 4px 14px color-mix(in srgb, var(--primary) 12%, transparent)" : "none",
+        boxShadow: "none",
       }}
       onMouseEnter={(e) => {
         if (!isSelected) e.currentTarget.style.backgroundColor = "var(--surface-container-low)";
@@ -376,12 +371,12 @@ function ProviderListItem({
     >
       <span
         className="inline-flex shrink-0 items-center justify-center"
-        style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: "var(--surface-container-high)", color: "var(--on-surface)" }}
+        style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: "var(--surface-container-high)", color: "var(--on-surface)" }}
       >
-        <VendorIcon vendor={vendor} size={24} fallback={Boxes} />
+        <VendorIcon vendor={vendor} size={20} fallback={Boxes} />
       </span>
       <Box className="min-w-0 flex-1">
-        <Text className="truncate" fz={14} fw={700} c={isSelected ? "var(--primary)" : "var(--on-surface)"}>
+        <Text className="truncate" fz={13} fw={500} c={isSelected ? "var(--primary)" : "var(--on-surface)"}>
           {provider.name}
         </Text>
         {subtitle && (
@@ -502,26 +497,24 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
   const activeTab = configTabs.find((t) => t.value === activeConfigTab) ?? configTabs[0];
 
   return (
-    <Stack gap="lg">
-      {/* 详情头部 Hero（editorial：大标题左对齐 + 关键元数据 flush-right 网格） */}
-      <Box className="prov-detail-hero" p="xl">
-        <Stack gap="lg">
+    <Stack gap="md">
+      <Box className="prov-detail-hero" p="md">
+        <Stack gap="md">
           <Group justify="space-between" align="flex-start" wrap="nowrap" gap="md">
-            <Group gap="md" align="flex-start" wrap="nowrap" className="min-w-0">
+            <Group gap="sm" align="flex-start" wrap="nowrap" className="min-w-0">
               <span
                 className="inline-flex shrink-0 items-center justify-center"
-                style={{ width: 48, height: 48, borderRadius: 14, backgroundColor: "var(--surface-container-high)", color: "var(--on-surface)" }}
+                style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: "var(--surface-container-high)", color: "var(--on-surface)" }}
               >
-                <VendorIcon vendor={vendor} size={30} fallback={Boxes} />
+                <VendorIcon vendor={vendor} size={22} fallback={Boxes} />
               </span>
               <Box className="min-w-0">
                 <Group gap="sm" align="center" wrap="wrap">
                   <Text
-                    className="font-headline tracking-tight"
-                    fz={32}
-                    fw={800}
+                    fz={16}
+                    fw={500}
                     c="var(--on-surface)"
-                    lh={1.1}
+                    lh={1.2}
                     style={{ wordBreak: "break-word" }}
                   >
                     {provider.name}
@@ -540,7 +533,7 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
                 size="compact-sm"
                 variant="subtle"
                 leftSection={<Globe size={14} />}
-                className="shrink-0"
+                className="prov-soft-button shrink-0"
                 onClick={() => {
                   void openUrl(websiteUrl).catch((err) => {
                     toast.error(text("无法打开链接", "Failed to open link"), { description: String(err) });
@@ -587,7 +580,7 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
             )}
             {provider.model && (
               <MetaField label="DEFAULT MODEL" icon={Cpu}>
-                <Text fz={15} fw={700} c="var(--on-surface)" className="break-all leading-5">
+                <Text fz={13} fw={500} c="var(--on-surface)" className="break-all leading-5">
                   {provider.model}
                 </Text>
               </MetaField>
@@ -607,12 +600,12 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
       {envEntries.length > 0 && (
         <Box>
           <Group gap="sm" mb="md" align="center">
-            <IconTile icon={KeyRound} tone="primary" size={28} />
-            <Text className="font-headline tracking-tight" fz={20} fw={800} c="var(--on-surface)">
+            <IconTile icon={KeyRound} tone="primary" size={24} />
+            <Text fz={13} fw={500} c="var(--on-surface)">
               {text("环境变量", "Environment Variables")}
             </Text>
             <span
-              className="inline-flex items-center rounded-lg px-2.5 py-0.5 text-sm font-bold"
+              className="inline-flex items-center rounded-lg px-2 py-0.5 text-xs font-medium"
               style={{
                 backgroundColor: "color-mix(in srgb, var(--primary) 12%, transparent)",
                 color: "var(--primary)",
@@ -626,7 +619,7 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
               <Box key={key} className="prov-env-card">
                 <Group justify="space-between" wrap="nowrap" gap="sm" align="flex-start">
                   <Group gap="sm" wrap="nowrap" align="flex-start" className="min-w-0 flex-1">
-                    <IconTile icon={envIcon(key)} tone="primary" size={24} />
+                    <IconTile icon={envIcon(key)} tone="primary" size={22} />
                     <Box className="min-w-0 flex-1">
                       <Text className="prov-env-key" component="div">
                         {key}
@@ -634,8 +627,8 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
                       <Text
                         component="code"
                         ff="var(--font-ui-mono)"
-                        fz={13}
-                        fw={600}
+                        fz={12}
+                        fw={400}
                         c="var(--on-surface)"
                         className="break-all leading-5"
                         mt={4}
@@ -651,6 +644,7 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
           </SimpleGrid>
           {hasMoreEnv && (
             <Button
+              className="prov-soft-button"
               variant="subtle"
               fullWidth
               mt="sm"
@@ -663,11 +657,11 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
         </Box>
       )}
 
-      {/* 配置区（editorial 下划线 Tab + 大圆角代码块） */}
-      <Box className="prov-detail-hero" p="lg">
+      {/* 配置区 */}
+      <Box className="prov-detail-hero" p="md">
         <Group gap="sm" align="center" mb="md">
-          <IconTile icon={Braces} tone="primary" size={28} />
-          <Text className="font-headline tracking-tight" fz={16} fw={800} c="var(--on-surface)">
+          <IconTile icon={Braces} tone="primary" size={24} />
+          <Text fz={13} fw={500} c="var(--on-surface)">
             {text("配置", "Configuration")}
           </Text>
         </Group>
@@ -676,7 +670,7 @@ function ProviderDetailPanel({ provider }: { provider: CcSwitchProvider }) {
             <button
               key={tab.value}
               type="button"
-              className="prov-tab font-headline"
+              className="prov-tab"
               data-active={tab.value === activeTab.value ? "true" : "false"}
               onClick={() => setActiveConfigTab(tab.value)}
             >
@@ -715,9 +709,9 @@ function MetaField({ label, icon: Icon, children }: { label: string; icon?: Luci
         <Text
           component="div"
           fz={11}
-          fw={700}
+          fw={500}
           c="var(--text-muted)"
-          style={{ letterSpacing: "0.18em", textTransform: "uppercase" }}
+          style={{ letterSpacing: 0, textTransform: "uppercase" }}
         >
           {label}
         </Text>
@@ -737,12 +731,12 @@ function EmptyStateGuideCard() {
   ];
 
   return (
-    <section className="ui-surface-card rounded-2xl border border-border p-6">
-      <Stack gap="lg">
+    <section className="ui-surface-card rounded-2xl border border-border p-4">
+      <Stack gap="md">
         <Group gap="md" align="center" wrap="nowrap">
-          <IconTile icon={Database} tone="primary" variant="solid" size={44} />
+          <IconTile icon={Database} tone="primary" variant="solid" size={36} />
           <Box className="min-w-0">
-            <Text size="lg" fw={700} c="var(--on-surface)">
+            <Text size="sm" fw={500} c="var(--on-surface)">
               {text("欢迎使用供应商设置", "Welcome to Provider Settings")}
             </Text>
             <Text size="sm" c="var(--text-muted)">
@@ -760,7 +754,7 @@ function EmptyStateGuideCard() {
           <Stack gap="sm">
             {steps.map((step) => (
               <Group key={step.text} gap="sm" align="center">
-                <IconTile icon={step.icon} tone="primary" size={28} />
+                <IconTile icon={step.icon} tone="primary" size={24} />
                 <Text size="sm" c="var(--on-surface)">
                   {step.text}
                 </Text>
@@ -772,7 +766,7 @@ function EmptyStateGuideCard() {
         <Button
           variant="light"
           leftSection={<ExternalLink size={15} />}
-          className="self-start"
+          className="prov-soft-button self-start"
           onClick={() => {
             void openUrl("https://github.com/deanxv/cc-switch").catch((err) => {
               toast.error(text("无法打开链接", "Failed to open link"), { description: String(err) });
@@ -906,10 +900,10 @@ export function ProviderSettingsPage({ searchValue }: { searchValue: string }) {
         <Stack gap="xs">
           <Group justify="space-between" align="center" gap="md" wrap="nowrap">
             <Group gap="sm" align="center" wrap="nowrap" className="min-w-0 flex-1">
-              <IconTile icon={Database} tone="primary" variant="solid" size={36} />
+              <IconTile icon={Database} tone="primary" variant="solid" size={30} />
               <Box className="min-w-0 flex-1">
                 <Group gap="xs" mb={2} align="center">
-                  <Text size="sm" fw={600} c="var(--on-surface)">
+                  <Text size="sm" fw={500} c="var(--on-surface)">
                     {text("cc-switch 数据库", "cc-switch Database")}
                   </Text>
                   <ProviderBadge tone={data ? "primary" : "neutral"}>
@@ -933,15 +927,15 @@ export function ProviderSettingsPage({ searchValue }: { searchValue: string }) {
               </Box>
             </Group>
             <Group gap="xs" className="shrink-0">
-              <Button size="compact-sm" variant="default" leftSection={<FolderOpen size={14} />} onClick={() => void pickDbFile()}>
+              <Button className="prov-soft-button" size="compact-sm" variant="default" leftSection={<FolderOpen size={14} />} onClick={() => void pickDbFile()}>
                 {text("选择文件", "Choose File")}
               </Button>
               {ccSwitchDbPath && (
-                <Button size="compact-sm" variant="subtle" color="gray" leftSection={<Undo2 size={14} />} onClick={() => void resetDbPath()}>
+                <Button className="prov-soft-button" size="compact-sm" variant="subtle" color="gray" leftSection={<Undo2 size={14} />} onClick={() => void resetDbPath()}>
                   {text("使用默认路径", "Use Default Path")}
                 </Button>
               )}
-              <Button size="compact-sm" variant="default" leftSection={<RefreshCw size={14} />} onClick={() => void loadProviders(true)} loading={loading}>
+              <Button className="prov-soft-button" size="compact-sm" variant="default" leftSection={<RefreshCw size={14} />} onClick={() => void loadProviders(true)} loading={loading}>
                 {text("刷新", "Refresh")}
               </Button>
             </Group>
@@ -987,8 +981,8 @@ export function ProviderSettingsPage({ searchValue }: { searchValue: string }) {
           className="self-start overflow-x-auto"
           style={{
             backgroundColor: "var(--surface-container-low)",
-            padding: "6px",
-            borderRadius: "16px",
+            padding: "4px",
+            borderRadius: "12px",
           }}
         >
           <Group gap={4} wrap="nowrap">
@@ -997,9 +991,9 @@ export function ProviderSettingsPage({ searchValue }: { searchValue: string }) {
                 key={option.value}
                 type="button"
                 onClick={() => setAppTypeFilter(option.value)}
-                className="shrink-0 px-4 py-2 font-headline font-bold text-xs transition-all"
+                className="shrink-0 px-3 py-1.5 text-xs font-medium transition-all"
                 style={{
-                  borderRadius: "12px",
+                  borderRadius: "10px",
                   backgroundColor:
                     appTypeFilter === option.value
                       ? "color-mix(in srgb, var(--primary) 18%, var(--surface-container-lowest))"
@@ -1048,7 +1042,7 @@ export function ProviderSettingsPage({ searchValue }: { searchValue: string }) {
 
       {data && visibleProviders.length > 0 && (
         <Box className="flex min-h-0 flex-1 gap-4">
-          <Box className="min-w-[280px] max-w-[400px] w-[30%] shrink-0 space-y-2.5 overflow-y-auto">
+          <Box className="prov-provider-list min-w-[280px] max-w-[400px] w-[30%] shrink-0 space-y-2.5 overflow-y-auto">
             {visibleProviders.map((provider) => (
               <ProviderListItem
                 key={`${provider.appType}-${provider.id}`}
