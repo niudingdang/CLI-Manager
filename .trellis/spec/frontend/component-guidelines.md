@@ -683,6 +683,33 @@ const writeTerminalChunk = (chunk: string) => {
 
 **Prevention**: When reading `terminal.buffer.active` after output writes, first check xterm's `write` callback contract. Do not use timers started before `terminal.write()` as evidence that the buffer cursor has already parked at the input caret.
 
+### Common Mistake: Rewriting ANSI when the bug is already in xterm buffer attrs
+
+**Symptom**: A TUI row, such as the Codex composer in Git Bash on a light terminal theme, keeps a stale dark background even after filtering likely SGR background sequences from the raw PTY stream.
+
+**Cause**: The raw stream is only one input to xterm. After xterm parses control sequences, the visible state is stored on buffer cells. If the app repaints the composer or uses a sequence form the filter did not cover, pre-parse ANSI rewriting becomes guesswork and misses the actual rendered cell attributes.
+
+**Fix**: For narrow TUI rendering fixes, run correction from the `terminal.write(data, callback)` callback, locate the visible prompt row through `terminal.buffer.active`, mutate only the known bad cell attribute, then call `terminal.refresh(row, row)`.
+
+```tsx
+terminal.write(chunk, () => {
+  if (terminalRef.current !== terminal) return;
+  normalizeTuiPromptBackground(terminal);
+});
+```
+
+When using xterm internals, keep the hack small and version-scoped. xterm 6 exposes a read-only public `IBufferLine`, but the runtime `BufferLineApiView` keeps the mutable line on `_line`. Clear only the background color bits (`0x03ffffff`) so text, inverse caret, underline, and other flags survive:
+
+```tsx
+const mutableLine = (line as IBufferLine & { _line?: MutableLine })._line;
+mutableLine.loadCell(x, cell);
+cell.bg &= ~0x03ffffff;
+mutableLine.setCell(x, cell);
+terminal.refresh(row, row);
+```
+
+**Prevention**: Do not keep broadening ANSI filters after the first miss. If the defect is a visual xterm cell state, inspect or correct `terminal.buffer.active` after the write callback. Gate the fix narrowly by shell/tool/theme and prompt signature.
+
 ### Convention: xterm Windows PTY and paste handling
 
 **What**: Internal xterm instances backed by the app's Windows PTY must use xterm's Windows compatibility and native paste path.

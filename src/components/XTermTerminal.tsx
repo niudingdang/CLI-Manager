@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type IBufferCell, type IBufferLine } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
@@ -58,6 +58,13 @@ import { logError } from "../lib/logger";
 const LEGACY_RUNTIME_OSC_PREFIX = "\x1b]777;cli-manager;";
 const INTEGRATION_OSC_PREFIXES = ["\x1b]133;", "\x1b]633;", LEGACY_RUNTIME_OSC_PREFIX];
 const OSC_CARRY_BUFFER_MAX = 8192;
+const OSC_PREFIX = "\x1b]";
+const XTERM_BG_COLOR_MASK = 0x03ffffff;
+const CODEX_COMPOSER_SCAN_ROWS = 8;
+const CODEX_COMPOSER_CONTINUATION_ROWS = 4;
+const CODEX_PROMPT_PATTERN = /^[\u203a\u276f\u00bb\u2023>]\s?/u;
+
+type SpecialColorQueryId = 10 | 11;
 
 type OscPrefixMatch =
   | { kind: "match"; prefix: string }
@@ -93,6 +100,21 @@ const findOscTerminator = (text: string, from: number): OscTerminator => {
   return null;
 };
 
+type MutableXtermCell = IBufferCell & {
+  bg: number;
+};
+
+interface MutableXtermLine {
+  length: number;
+  loadCell(index: number, cell: MutableXtermCell): MutableXtermCell;
+  setCell(index: number, cell: MutableXtermCell): void;
+}
+
+type XtermBufferLineApiView = IBufferLine & {
+  // xterm's public buffer line is read-only; v6 keeps the mutable line here.
+  _line?: MutableXtermLine;
+};
+
 interface SearchResultState {
   resultIndex: number;
   resultCount: number;
@@ -117,6 +139,42 @@ const hexToRgba = (value: string | undefined, alpha: number, fallback: string) =
   const g = Number.parseInt(hex.slice(2, 4), 16);
   const b = Number.parseInt(hex.slice(4, 6), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
+const hexToRgb = (value: string | undefined): [number, number, number] | null => {
+  const normalized = normalizeHexColor(value, "");
+  if (!normalized) return null;
+  return [
+    Number.parseInt(normalized.slice(1, 3), 16),
+    Number.parseInt(normalized.slice(3, 5), 16),
+    Number.parseInt(normalized.slice(5, 7), 16),
+  ];
+};
+
+const isLightHexColor = (value: string | undefined) => {
+  const rgb = hexToRgb(value);
+  if (!rgb) return false;
+  const [r, g, b] = rgb;
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160;
+};
+
+const parseSpecialColorQuery = (body: string): SpecialColorQueryId | null => {
+  const separator = body.indexOf(";");
+  if (separator < 0) return null;
+  const oscId = body.slice(0, separator);
+  const payload = body.slice(separator + 1).trim();
+  if (payload !== "?") return null;
+  if (oscId === "10") return 10;
+  if (oscId === "11") return 11;
+  return null;
+};
+
+const formatSpecialColorReply = (queryId: SpecialColorQueryId, hex: string) => {
+  const normalized = normalizeHexColor(hex, queryId === 10 ? "#d8dee9" : "#0c0e10");
+  const r = normalized.slice(1, 3);
+  const g = normalized.slice(3, 5);
+  const b = normalized.slice(5, 7);
+  return `${OSC_PREFIX}${queryId};rgb:${r}${r}/${g}${g}/${b}${b}\x1b\\`;
 };
 
 const copyTextToClipboard = async (text: string) => {
@@ -220,6 +278,12 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
   const activeWriteRafRef = useRef<number | null>(null);
   const cursorShowTimerRef = useRef<number | null>(null);
   const runtimeOscBufferRef = useRef("");
+  const specialOscBufferRef = useRef("");
+  const terminalBackgroundIsLightRef = useRef(false);
+  const terminalColorRepliesRef = useRef<{ foreground: string; background: string }>({
+    foreground: formatSpecialColorReply(10, "#d8dee9"),
+    background: formatSpecialColorReply(11, "#0c0e10"),
+  });
   const terminalScrollbackRows = useSettingsStore((s) => s.terminalScrollbackRows);
   const inactiveBufferLimitRef = useRef(getInactiveBufferLimit(terminalScrollbackRows));
   inactiveBufferLimitRef.current = getInactiveBufferLimit(terminalScrollbackRows);
@@ -340,6 +404,25 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     useTerminalStore.getState().handleShellRuntimeEvent({ sessionId, event, exitCode, origin: "osc" });
   };
 
+  const isCodexSession = () => {
+    const session = useTerminalStore.getState().sessions.find((item) => item.id === sessionId);
+    const project = session?.projectId
+      ? useProjectStore.getState().projects.find((item) => item.id === session.projectId)
+      : null;
+    if (project?.cli_tool.trim().toLowerCase() === "codex") return true;
+    const startupCmd = session?.startupCmd?.toLowerCase() ?? "";
+    const titleTool = session?.title.match(/\(([^()]*)\)\s*$/)?.[1]?.trim().toLowerCase() ?? "";
+    return titleTool === "codex" || /(?:^|\s)codex(?:\s|$)/.test(startupCmd);
+  };
+
+  const shouldNormalizeCodexComposerBackground = () => {
+    if (!terminalBackgroundIsLightRef.current || !isCodexSession()) return false;
+    const session = useTerminalStore.getState().sessions.find((item) => item.id === sessionId);
+    const sessionShell = normalizeShellKey(session?.shell);
+    if (sessionShell) return sessionShell === "gitbash";
+    return normalizeShellKey(useSettingsStore.getState().defaultShell) === "gitbash";
+  };
+
   // 私有 OSC 777：session=<id>;event=<name>[;exit=<code>]
   const handleLegacyRuntimeOsc = (body: string) => {
     const fields = Object.fromEntries(body.split(";").map((part) => {
@@ -432,6 +515,123 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     return output;
   };
 
+  const processSpecialOscQueries = (text: string) => {
+    const combined = specialOscBufferRef.current + text;
+    specialOscBufferRef.current = "";
+    let output = "";
+    let cursor = 0;
+
+    while (cursor < combined.length) {
+      const start = combined.indexOf(OSC_PREFIX, cursor);
+      if (start < 0) {
+        if (combined.charCodeAt(combined.length - 1) === 0x1b) {
+          output += combined.slice(cursor, combined.length - 1);
+          specialOscBufferRef.current = "\x1b";
+        } else {
+          output += combined.slice(cursor);
+        }
+        break;
+      }
+
+      output += combined.slice(cursor, start);
+      const terminator = findOscTerminator(combined, start + OSC_PREFIX.length);
+      if (terminator === null) {
+        specialOscBufferRef.current = combined.slice(start);
+        break;
+      }
+      if ("abortAt" in terminator) {
+        output += combined.slice(start, terminator.abortAt);
+        cursor = terminator.abortAt;
+        continue;
+      }
+
+      const body = combined.slice(start + OSC_PREFIX.length, terminator.index);
+      const queryId = parseSpecialColorQuery(body);
+      if (queryId === 10 || queryId === 11) {
+        // Codex only waits briefly for OSC 10/11 terminal color replies during
+        // startup. Reply directly from the raw PTY stream path so theme
+        // detection is not delayed by xterm's render/write scheduling.
+        const reply =
+          queryId === 10
+            ? terminalColorRepliesRef.current.foreground
+            : terminalColorRepliesRef.current.background;
+        invoke("pty_write", { sessionId, data: reply }).catch((err) => reportPtyWriteError("osc_color_reply", err));
+      } else {
+        output += combined.slice(start, terminator.index + terminator.length);
+      }
+      cursor = terminator.index + terminator.length;
+    }
+
+    if (specialOscBufferRef.current.length > OSC_CARRY_BUFFER_MAX) {
+      specialOscBufferRef.current = "";
+    }
+
+    return output;
+  };
+
+  const normalizeCodexComposerBackground = (terminal: Terminal) => {
+    if (!shouldNormalizeCodexComposerBackground()) return;
+    const buffer = terminal.buffer.active;
+    const probeCell = buffer.getNullCell() as MutableXtermCell;
+
+    const getViewportLine = (row: number) => buffer.getLine(buffer.viewportY + row);
+    const normalizePromptText = (line: IBufferLine) => (
+      line.translateToString(true).trimStart().replace(TUI_BORDER_PREFIX_PATTERN, "")
+    );
+    const isCodexPromptLine = (line: IBufferLine) => CODEX_PROMPT_PATTERN.test(normalizePromptText(line));
+    const hasExplicitBackground = (line: IBufferLine) => {
+      const limit = Math.min(terminal.cols, line.length);
+      for (let x = 0; x < limit; x += 1) {
+        const cell = line.getCell(x, probeCell);
+        if (cell && cell.getBgColorMode() !== 0) return true;
+      }
+      return false;
+    };
+    const clearLineBackground = (line: IBufferLine) => {
+      const mutableLine = (line as XtermBufferLineApiView)._line;
+      if (!mutableLine) return false;
+      const limit = Math.min(terminal.cols, mutableLine.length);
+      let changed = false;
+      for (let x = 0; x < limit; x += 1) {
+        mutableLine.loadCell(x, probeCell);
+        // Keep text flags such as inverse caret; drop only explicit bg color.
+        const nextBg = probeCell.bg & ~XTERM_BG_COLOR_MASK;
+        if (nextBg === probeCell.bg) continue;
+        probeCell.bg = nextBg;
+        mutableLine.setCell(x, probeCell);
+        changed = true;
+      }
+      return changed;
+    };
+
+    const minRow = Math.max(0, terminal.rows - CODEX_COMPOSER_SCAN_ROWS);
+    let promptRow: number | null = null;
+    for (let row = terminal.rows - 1; row >= minRow; row -= 1) {
+      const line = getViewportLine(row);
+      if (line && isCodexPromptLine(line)) {
+        promptRow = row;
+        break;
+      }
+    }
+    if (promptRow === null) return;
+
+    let firstChangedRow = terminal.rows;
+    let lastChangedRow = -1;
+    const maxRow = Math.min(terminal.rows - 1, promptRow + CODEX_COMPOSER_CONTINUATION_ROWS);
+    for (let row = promptRow; row <= maxRow; row += 1) {
+      const line = getViewportLine(row);
+      if (!line) break;
+      if (row > promptRow && !line.isWrapped && !hasExplicitBackground(line)) break;
+      if (!clearLineBackground(line)) continue;
+      firstChangedRow = Math.min(firstChangedRow, row);
+      lastChangedRow = Math.max(lastChangedRow, row);
+    }
+
+    if (lastChangedRow >= firstChangedRow) {
+      terminal.refresh(firstChangedRow, lastChangedRow);
+    }
+  };
+
   const processCursorVisibility = (text: string) => {
     const cursorPattern = /\x1b\[\?25[hl]/g;
     let processed = "";
@@ -460,7 +660,10 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     if (!terminal) return;
 
     const writeTerminalChunk = (chunk: string) => {
-      terminal.write(chunk);
+      terminal.write(chunk, () => {
+        if (terminalRef.current !== terminal) return;
+        normalizeCodexComposerBackground(terminal);
+      });
     };
 
     let budget = ACTIVE_WRITE_FRAME_BUDGET;
@@ -511,6 +714,7 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     if (terminal.options.scrollback !== terminalScrollbackRows) {
       terminal.options.scrollback = terminalScrollbackRows;
     }
+    normalizeCodexComposerBackground(terminal);
   }, [fontSize, fontFamily, terminalScrollbackRows, resolvedTheme, terminalThemeName, lightThemePalette, darkThemePalette, isTransparent, background.overlayDarken]);
 
   // Visibility drives live rendering. A pane tab is "visible" when it is the
@@ -531,6 +735,9 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     }
     // Wait one frame to ensure display:block has taken effect and layout is stable.
     scheduleFit(true);
+    if (terminalRef.current) {
+      normalizeCodexComposerBackground(terminalRef.current);
+    }
   }, [isVisible]);
 
   // Focus follows the single globally active tab. Keyboard, cursor and IME stay
@@ -727,17 +934,6 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     };
     contextMenuTarget.addEventListener("contextmenu", onContextMenu);
 
-    const isCodexNewlineSession = () => {
-      const session = useTerminalStore.getState().sessions.find((item) => item.id === sessionId);
-      const project = session?.projectId
-        ? useProjectStore.getState().projects.find((item) => item.id === session.projectId)
-        : null;
-      if (project?.cli_tool.trim().toLowerCase() === "codex") return true;
-      const startupCmd = session?.startupCmd?.toLowerCase() ?? "";
-      const titleTool = session?.title.match(/\(([^()]*)\)\s*$/)?.[1]?.trim().toLowerCase() ?? "";
-      return titleTool === "codex" || /(?:^|\s)codex(?:\s|$)/.test(startupCmd);
-    };
-
     terminal.attachCustomKeyEventHandler((e) => {
       if (e.type === "keydown" && e.key === "Enter") {
         const shortcut = useSettingsStore.getState().terminalNewlineShortcut;
@@ -753,7 +949,7 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
           e.preventDefault();
           if (matched) {
             markAttentionInputHandled();
-            const newlineData = isCodexNewlineSession() ? "\x1b\r" : "\n";
+            const newlineData = isCodexSession() ? "\x1b\r" : "\n";
             invoke("pty_write", { sessionId, data: newlineData }).catch((err) => reportPtyWriteError("newline", err));
           }
           return false;
@@ -881,7 +1077,7 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
       for (let i = 0; i < binaryString.length; i += 1) {
         bytes[i] = binaryString.charCodeAt(i);
       }
-      const text = processShellIntegrationOsc(textDecoder.decode(bytes, { stream: true }));
+      const text = processShellIntegrationOsc(processSpecialOscQueries(textDecoder.decode(bytes, { stream: true })));
       if (!text) return;
       if (isVisibleRef.current) {
         pendingChunks.push(text);
@@ -1354,10 +1550,14 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
     };
   }, [sessionId]);
 
-  const backgroundColor = getTerminalBackground(terminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette);
-
-  const showBackgroundImage = isTransparent && assetUrl !== null;
   const terminalTheme = getTerminalTheme(terminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette);
+  const backgroundColor = getTerminalBackground(terminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette);
+  const showBackgroundImage = isTransparent && assetUrl !== null;
+  terminalBackgroundIsLightRef.current = isLightHexColor(backgroundColor);
+  terminalColorRepliesRef.current = {
+    foreground: formatSpecialColorReply(10, normalizeHexColor(terminalTheme.foreground, "#d8dee9")),
+    background: formatSpecialColorReply(11, normalizeHexColor(terminalTheme.background, backgroundColor)),
+  };
   const searchForeground = normalizeHexColor(terminalTheme.foreground, "#d8dee9");
   const searchBackground = normalizeHexColor(terminalTheme.background, backgroundColor);
   const searchAccent = normalizeHexColor(terminalTheme.cursor, searchForeground);
