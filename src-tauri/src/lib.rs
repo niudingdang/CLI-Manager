@@ -12,9 +12,9 @@ mod wsl;
 
 use log::LevelFilter;
 use tauri::{
-    AppHandle, Emitter, Manager, Runtime,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, Runtime,
 };
 use tauri_plugin_log::{Builder as LogBuilder, Target, TargetKind, TimezoneStrategy};
 use tauri_plugin_sql::{Builder as SqlBuilder, Migration, MigrationKind};
@@ -229,6 +229,11 @@ pub fn run() {
     } else {
         LevelFilter::Info
     };
+    let log_file_name = if cfg!(debug_assertions) {
+        "cli-manager-dev.log"
+    } else {
+        "cli-manager.log"
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -236,7 +241,7 @@ pub fn run() {
         }))
         .plugin({
             let mut targets = vec![Target::new(TargetKind::LogDir {
-                file_name: Some("cli-manager.log".into()),
+                file_name: Some(log_file_name.into()),
             })];
             if debug_logs {
                 targets.push(Target::new(TargetKind::Webview));
@@ -256,12 +261,13 @@ pub fn run() {
                 commands::history::set_history_index_cache_dir(dir);
             }
             log::info!(
-                "CLI-Manager started (log_level={})",
+                "CLI-Manager started (log_level={}, log_file={})",
                 if log_level == LevelFilter::Debug {
                     "debug"
                 } else {
                     "info"
-                }
+                },
+                log_file_name
             );
 
             let show_item = MenuItem::with_id(app, "tray_show", "显示", true, None::<&str>)?;
