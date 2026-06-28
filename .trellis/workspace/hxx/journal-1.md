@@ -645,3 +645,36 @@ Add project-level Codex provider switching with generated profiles, cleanup, sid
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: 系统通知点击跳转终端
+
+**Date**: 2026-06-28
+**Task**: 系统通知点击跳转终端
+**Branch**: `master`
+
+### Summary
+
+实现 Claude/Codex Hook 系统通知点击唤起并定位终端，补充开发版单实例兼容和 V1.2.2 changelog。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `79e15d8` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
