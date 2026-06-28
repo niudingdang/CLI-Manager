@@ -624,7 +624,7 @@ function App() {
           font-family: ${uiFontFamily} !important;
         }
         .xterm, .xterm *, .xterm-helper-textarea {
-          font-family: revert !important;
+          font-family: var(--terminal-font-family, "Cascadia Code", Consolas, monospace) !important;
         }
       `;
     } else {
