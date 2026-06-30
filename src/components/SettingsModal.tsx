@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import "@mantine/core/styles.css";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { AppMantineThemeProvider } from "./ui/MantineThemeProvider";
@@ -15,6 +15,7 @@ import { ModelPricingSettingsPage } from "./settings/pages/ModelPricingSettingsP
 import { AboutSettingsPage } from "./settings/pages/AboutSettingsPage";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useI18n, type TranslationKey } from "../lib/i18n";
+import { logInfo } from "../lib/logger";
 
 export type SettingsTab =
   | "general"
@@ -108,6 +109,7 @@ const SETTINGS_TAB_CONFIG: Record<SettingsTab, SettingsTabConfig> = {
 interface Props {
   open: boolean;
   onClose: () => void;
+  onAfterClose?: () => void;
   initialTab?: SettingsTab;
   onActiveTabChange?: (tab: SettingsTab) => void;
 }
@@ -116,31 +118,49 @@ function isLikelyMacOs() {
   return typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
 }
 
-export function SettingsModal({ open, onClose, initialTab, onActiveTabChange }: Props) {
+export function SettingsModal({ open, onClose, onAfterClose, initialTab, onActiveTabChange }: Props) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? "general");
   const [searchValue, setSearchValue] = useState("");
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const wasOpenRef = useRef(open);
   const uiFontFamily = useSettingsStore((s) => s.uiFontFamily);
   const { t } = useI18n();
   useFocusTrap(dialogRef, mounted && !closing);
 
+  const requestClose = useCallback((reason: "topbar" | "backdrop" | "escape") => {
+    logInfo("settings.modal.close.request", {
+      reason,
+      activeTab,
+      mounted,
+      closing,
+    });
+    onClose();
+  }, [activeTab, closing, mounted, onClose]);
+
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpenRef.current) {
       if (initialTab) setActiveTab(initialTab);
       setMounted(true);
       setClosing(false);
-      return;
+      logInfo("settings.modal.open", {
+        activeTab: initialTab ?? activeTab,
+      });
     }
+    wasOpenRef.current = open;
+  }, [open, initialTab, activeTab]);
+
+  useEffect(() => {
+    if (open) return;
     if (!mounted) return;
-    setClosing(true);
-    const timer = setTimeout(() => {
-      setMounted(false);
-      setClosing(false);
-    }, 180);
-    return () => clearTimeout(timer);
-  }, [open, mounted, initialTab]);
+    logInfo("settings.modal.close.commit", {
+      activeTab,
+    });
+    setMounted(false);
+    setClosing(false);
+    onAfterClose?.();
+  }, [open, mounted, initialTab, onAfterClose, activeTab]);
 
   const handleTabChange = (tab: SettingsTab) => {
     if (tab === activeTab) return;
@@ -157,11 +177,11 @@ export function SettingsModal({ open, onClose, initialTab, onActiveTabChange }: 
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      onClose();
+      requestClose("escape");
     };
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [mounted, closing, onClose]);
+  }, [mounted, closing, requestClose]);
 
   if (!mounted) return null;
 
@@ -188,7 +208,7 @@ export function SettingsModal({ open, onClose, initialTab, onActiveTabChange }: 
           closing ? "animate-fade-out" : "animate-fade-in"
         }`}
         style={{ fontFamily: uiFontFamily }}
-        onClick={onClose}
+        onClick={() => requestClose("backdrop")}
       >
         <div
           ref={dialogRef}
@@ -209,7 +229,7 @@ export function SettingsModal({ open, onClose, initialTab, onActiveTabChange }: 
             searchValue={searchValue}
             searchPlaceholder={activeConfig.searchPlaceholder ? t(activeConfig.searchPlaceholder) : undefined}
             onSearchChange={setSearchValue}
-            onClose={onClose}
+            onClose={() => requestClose("topbar")}
           >
             {activeContent}
           </SettingsLayout>
