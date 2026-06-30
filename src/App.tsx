@@ -500,8 +500,13 @@ function App() {
     if (!IN_TAURI) return;
     const unlistenHook = listen<CliHookPayload>("claude-hook-notification", (event) => {
       void useReplayStore.getState().recordCliHookEvent(event.payload);
+      const isClaudeToolSubagentEvent =
+        event.payload.source === "claude" &&
+        (event.payload.event === "ToolStart" || event.payload.event === "ToolStop") &&
+        Boolean(event.payload.agentId?.trim());
+
       // SubagentStart / AgentToolStart：开/更新子 Agent 转录分屏，独立于 Tab 状态机与 toast。
-      if (event.payload.event === "SubagentStart" || event.payload.event === "AgentToolStart") {
+      if (event.payload.event === "SubagentStart" || event.payload.event === "AgentToolStart" || isClaudeToolSubagentEvent) {
         void useTerminalStore.getState().openSubagentTranscript(event.payload);
         return;
       }
