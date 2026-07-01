@@ -24,6 +24,7 @@ Use this checklist for any task that writes files, whether it goes through the f
 
 ## Before You Finalize
 
+- Before or at the start of any file-writing task, confirm which `CHANGELOG.md` version should receive the work. If the user does not provide a version number, use temporary version `[TEMP]` instead of guessing.
 - If the task changed user-visible behavior or developer-facing workflow behavior, update [`CHANGELOG.md`](../../../CHANGELOG.md).
 - If the task changed product/app functionality, update [`docs/功能清单.md`](../../../docs/%E5%8A%9F%E8%83%BD%E6%B8%85%E5%8D%95.md).
 - If the user explicitly provided an issue number or issue URL, associate the commit message with that issue.
