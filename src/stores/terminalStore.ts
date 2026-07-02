@@ -9,7 +9,7 @@ import { getTerminalTheme } from "../lib/terminalThemes";
 import { useSettingsStore } from "./settingsStore";
 import { useSessionStore } from "./sessionStore";
 import { defaultShellForOs, getOsPlatform, normalizeShellForOs, normalizeShellKey, type OsPlatform, type ShellKey } from "../lib/shell";
-import { getCodexProviderOverride, isExactCodexProject } from "../lib/providerSwitching";
+import { getClaudeProviderOverride, getCodexProviderOverride, getProviderSwitchAppType, isExactCodexProject } from "../lib/providerSwitching";
 import { useProjectStore } from "./projectStore";
 import {
   addSessionToPaneTree,
@@ -653,51 +653,18 @@ function prepareStartupCommandForPty(command: string | undefined, shell: ShellKe
   return withCodexLightTuiTheme(command);
 }
 
-function buildDirectCodexLaunchCommand(command: string, shell: ShellKey | null | undefined): string {
+function buildDirectCodexLaunchCommand(command: string): string {
   const normalized = normalizeDirectCodexStartupCommand(command) ?? command.trim();
-  switch (shell) {
-    case "powershell":
-    case "pwsh":
-      return `Clear-Host; ${normalized}`;
-    case "cmd":
-      return `cls & ${normalized}`;
-    case "gitbash":
-    case "bash":
-    case "zsh":
-    case "sh":
-    case "fish":
-    case "wsl":
-      return `clear; ${normalized}`;
-    default:
-      return `\x0c${normalized}`;
-  }
+  return `\x0c${normalized}`;
 }
 
-export function formatStartupInputForPty(command: string, shell?: ShellKey | null): string {
+export function formatStartupInputForPty(command: string, _shell?: ShellKey | null): string {
   if (!isDirectCodexStartupCommand(command)) return `${command}\r`;
-  return `${buildDirectCodexLaunchCommand(command, shell ?? null)}\r`;
-}
-
-function buildCancelCurrentInputControl(shell: ShellKey | null | undefined): string {
-  switch (shell) {
-    case "powershell":
-    case "pwsh":
-    case "cmd":
-    case "gitbash":
-    case "bash":
-    case "zsh":
-    case "sh":
-    case "fish":
-    case "wsl":
-      return "\x03";
-    default:
-      return "";
-  }
+  return `${buildDirectCodexLaunchCommand(command)}\r`;
 }
 
 export function formatManualDirectCodexInputForPty(command: string, shell?: ShellKey | null): string {
-  const normalizedShell = shell ?? null;
-  return `${buildCancelCurrentInputControl(normalizedShell)}${formatStartupInputForPty(command, normalizedShell)}`;
+  return formatStartupInputForPty(command, shell ?? null);
 }
 
 // hook running 超时回退：Stop/StopFailure 丢失（hook 脚本失败、bridge 不可达）
@@ -771,6 +738,20 @@ function getCodexProviderLaunchConfig(projectId?: string, startupCmd?: string | 
   };
 }
 
+function getClaudeProviderLaunchConfig(projectId?: string) {
+  if (!projectId) return null;
+  const project = useProjectStore.getState().projects.find((item) => item.id === projectId);
+  if (!project || getProviderSwitchAppType(project) !== "claude") return null;
+  const override = getClaudeProviderOverride(project);
+  if (!override) return null;
+  const settings = useSettingsStore.getState();
+  return {
+    projectId: project.id,
+    providerId: override.providerId,
+    dbPath: settings.ccSwitchDbPath ?? undefined,
+  };
+}
+
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -797,6 +778,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         envVars: buildPtyEnvVars(envVars ?? null, resolvedShell),
         shell: resolvedShell,
         hookEnvEnabled: await shouldEnableHookEnv(),
+        claudeProvider: getClaudeProviderLaunchConfig(projectId),
         codexProvider: getCodexProviderLaunchConfig(projectId, startupCmd),
       });
     } catch (err) {
@@ -1108,6 +1090,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         envVars: buildPtyEnvVars(options?.envVars ?? null, resolvedShell),
         shell: resolvedShell,
         hookEnvEnabled: await shouldEnableHookEnv(),
+        claudeProvider: getClaudeProviderLaunchConfig(options?.projectId),
         codexProvider: getCodexProviderLaunchConfig(options?.projectId, options?.startupCmd),
       });
     } catch (err) {
@@ -1351,6 +1334,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           envVars: buildPtyEnvVars(ps.envVars ?? null, resolvedShell),
           shell: resolvedShell,
           hookEnvEnabled: await shouldEnableHookEnv(),
+          claudeProvider: getClaudeProviderLaunchConfig(ps.projectId),
           codexProvider: getCodexProviderLaunchConfig(ps.projectId, ps.startupCmd),
         });
       } catch (err) {
