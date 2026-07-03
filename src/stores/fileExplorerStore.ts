@@ -548,8 +548,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
   refresh: async () => {
     const project = get().project;
     if (!project) return;
-    await get().openProject(project);
-    if (get().searchQuery.trim()) await get().setSearchQuery(get().searchQuery);
+    await get().refreshVisibleState();
   },
 
   refreshVisibleState: async () => {
