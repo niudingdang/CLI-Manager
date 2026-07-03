@@ -310,12 +310,28 @@ export interface SessionMeta {
   updated_at: string;
 }
 
+export interface SessionFavoriteSnapshot {
+  session_key: string;
+  session_id: string;
+  source: HistorySource;
+  project_key: string;
+  file_path: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  message_count: number;
+  branch?: string | null;
+  detail_json: string;
+  snapshot_at: string;
+}
+
 export interface HistorySessionView extends HistorySessionSummary {
   sessionKey: string;
   alias: string;
   starred: boolean;
   tags: string[];
   displayTitle: string;
+  favoriteSnapshot?: boolean;
 }
 
 export interface HistoryStatsProjectItem {
