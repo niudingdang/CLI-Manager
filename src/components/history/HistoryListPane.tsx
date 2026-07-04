@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Bot, Check, ChevronDown, ChevronRight, CircleChevronDown, CircleChevronRight, Clock3, Folder, MessageSquare, RefreshCw, Search, Star, Terminal, Trash2, X } from "lucide-react";
+import { Bot, Check, ChevronDown, ChevronRight, Clock3, Folder, MessageSquare, RefreshCw, Search, Star, Terminal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
 import type { Group, HistorySearchHit, HistorySessionView, HistorySourceFilter, Project } from "../../lib/types";
 import { useI18n, type TranslationKey } from "../../lib/i18n";
@@ -797,7 +797,7 @@ export function HistoryListPane({
                             e.stopPropagation();
                             toggleSessionParent(row.item.sessionKey);
                           }}
-                          className="ui-flat-action mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-surface-container-high text-text-secondary"
+                          className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-transparent px-0 text-text-muted opacity-75 transition-colors hover:text-text-primary hover:opacity-100 focus-visible:outline-none focus-visible:text-text-primary focus-visible:opacity-100"
                           aria-expanded={!collapsedSessionParents.has(row.item.sessionKey)}
                           aria-label={t(
                             collapsedSessionParents.has(row.item.sessionKey)
@@ -813,9 +813,9 @@ export function HistoryListPane({
                           )}
                         >
                           {collapsedSessionParents.has(row.item.sessionKey) ? (
-                            <CircleChevronRight size={19} strokeWidth={2.1} className="text-primary/90" />
+                            <ChevronRight size={15} strokeWidth={2} />
                           ) : (
-                            <CircleChevronDown size={19} strokeWidth={2.1} className="text-primary/90" />
+                            <ChevronDown size={15} strokeWidth={2} />
                           )}
                         </button>
                       )}
@@ -836,15 +836,12 @@ export function HistoryListPane({
                             {row.item.starred && <Star size={12} className="shrink-0" style={{ color: "var(--warning)" }} fill="currentColor" />}
                             {row.depth > 0 && (
                               <span
-                                className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em]"
-                                style={{
-                                  backgroundColor: "color-mix(in srgb, var(--primary) 16%, var(--surface-container-high) 84%)",
-                                  border: "1px solid color-mix(in srgb, var(--primary) 34%, transparent)",
-                                  color: "color-mix(in srgb, var(--primary) 72%, var(--text-primary) 28%)",
-                                }}
+                                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-border/55 bg-surface-container-high text-text-muted"
+                                role="img"
+                                aria-label={t("history.tree.subagent")}
+                                title={t("history.tree.subagent")}
                               >
-                                <Bot size={10} strokeWidth={2.2} />
-                                {t("history.tree.subagent")}
+                                <Bot size={12} strokeWidth={1.9} />
                               </span>
                             )}
                             <span className="truncate text-[13px] font-semibold text-text-primary">{row.item.displayTitle}</span>
@@ -878,15 +875,12 @@ export function HistoryListPane({
                             {row.item.starred && <Star size={12} className="shrink-0" style={{ color: "var(--warning)" }} fill="currentColor" />}
                             {row.depth > 0 && (
                               <span
-                                className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em]"
-                                style={{
-                                  backgroundColor: "color-mix(in srgb, var(--primary) 16%, var(--surface-container-high) 84%)",
-                                  border: "1px solid color-mix(in srgb, var(--primary) 34%, transparent)",
-                                  color: "color-mix(in srgb, var(--primary) 72%, var(--text-primary) 28%)",
-                                }}
+                                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-border/55 bg-surface-container-high text-text-muted"
+                                role="img"
+                                aria-label={t("history.tree.subagent")}
+                                title={t("history.tree.subagent")}
                               >
-                                <Bot size={10} strokeWidth={2.2} />
-                                {t("history.tree.subagent")}
+                                <Bot size={12} strokeWidth={1.9} />
                               </span>
                             )}
                             <span className="truncate text-[13px] font-semibold text-text-primary">{row.item.displayTitle}</span>
@@ -912,11 +906,11 @@ export function HistoryListPane({
                         <button
                           type="button"
                           onClick={() => onDeleteSession(row.item)}
-                          className="ui-flat-action inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent bg-transparent px-0 text-text-muted opacity-55 hover:border-danger/30 hover:bg-danger/10 hover:text-danger hover:opacity-100 focus-visible:opacity-100 group-hover/session-row:opacity-100"
+                          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-transparent px-0 text-text-muted opacity-45 transition-colors hover:text-danger hover:opacity-100 focus-visible:outline-none focus-visible:text-danger focus-visible:opacity-100 group-hover/session-row:opacity-90"
                           aria-label={t("history.deleteSessionNamed", { title: row.item.displayTitle })}
                           title={t("history.deleteSession")}
                         >
-                          <X size={14} />
+                          <X size={13} strokeWidth={2} />
                         </button>
                       )}
                     </div>
