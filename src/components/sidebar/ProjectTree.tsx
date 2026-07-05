@@ -1,6 +1,6 @@
 import { DndContext, DragOverlay, PointerSensor, closestCenter, useSensor, useSensors, type CollisionDetection, type DragStartEvent } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { TreeNode as TNode } from "../../lib/types";
 import type { SessionStatus } from "../../stores/terminalStore";
 import { SidebarSkeleton } from "../ui/Skeleton";
@@ -11,9 +11,6 @@ import { VendorIcon, inferVendor } from "../VendorIcon";
 import { TreeNodeItem } from "./TreeNodeItem";
 import { useTreeActions, type TreeActions } from "./TreeContext";
 import { useI18n } from "../../lib/i18n";
-import { useExternalSessionSyncStore } from "../../stores/externalSessionSyncStore";
-import { groupSyncedExternalSessions } from "../../lib/externalSessionGrouping";
-import type { Project } from "../../lib/types";
 
 interface ProjectTreeProps {
   tree: TNode[];
@@ -45,17 +42,6 @@ function countProjects(node: TNode): number {
   return node.children.reduce((sum, child) => sum + countProjects(child), 0);
 }
 
-function collectProjects(nodes: TNode[], out: Project[] = []): Project[] {
-  for (const node of nodes) {
-    if (node.type === "project") {
-      out.push(node.project);
-    } else {
-      collectProjects(node.children, out);
-    }
-  }
-  return out;
-}
-
 interface VisibleTreeNode {
   key: string;
   kind: "all-terminals" | "group" | "project";
@@ -74,6 +60,12 @@ function nodeKey(node: TNode): string {
 
 function isProjectSearchKey(key: string): boolean {
   return /^[a-z0-9._\\/-]$/i.test(key);
+}
+
+function preventSecondaryPointerFocus(event: ReactPointerEvent<HTMLElement>) {
+  if (event.button !== 2) return;
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function matchesProjectQuery(project: Extract<TNode, { type: "project" }>["project"], normalizedQuery: string): boolean {
@@ -220,7 +212,6 @@ export function ProjectTree({
 }: ProjectTreeProps) {
   const { t } = useI18n();
   const actions = useTreeActions();
-  const syncedSessions = useExternalSessionSyncStore((state) => state.syncedSessions);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [focusedNodeKey, setFocusedNodeKey] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -232,11 +223,6 @@ export function ProjectTree({
   const filteredTree = useMemo(
     () => (searchActive ? filterTreeNodes(tree, searchQuery) : tree),
     [searchActive, searchQuery, tree]
-  );
-  const projects = useMemo(() => collectProjects(tree), [tree]);
-  const syncedGroupsByProjectId = useMemo(
-    () => groupSyncedExternalSessions(syncedSessions, projects).byProjectId,
-    [projects, syncedSessions]
   );
   const visibleNodes = useMemo(
     () => {
@@ -606,6 +592,7 @@ export function ProjectTree({
             className="min-h-full outline-none"
             onKeyDown={handleTreeKeyDown}
             onMouseDown={(event) => {
+              if (event.button === 2) return;
               const target = event.target as HTMLElement | null;
               if (!target) return;
               if (target.closest("button, input, textarea, select, a, [contenteditable='true']")) return;
@@ -647,7 +634,6 @@ export function ProjectTree({
                 onFocusNode={setFocusedNodeKey}
                 forceExpanded={searchActive}
                 sortableEnabled={!searchActive}
-                syncedGroupsByProjectId={syncedGroupsByProjectId}
               />
             ))}
           </div>
@@ -701,6 +687,7 @@ function CollapsedProjectButton({ node, sizeClass }: { node: TNode; sizeClass: s
       data-selected={selected ? "true" : "false"}
       title={p.name}
       aria-label={t("sidebar.tree.openProject", { name: p.name })}
+      onPointerDownCapture={preventSecondaryPointerFocus}
       onClick={() => actions.onOpenProject(p)}
       onContextMenu={(e) => actions.onContextMenuProject(e, p)}
     >
@@ -770,6 +757,7 @@ function CollapsedGroupButton({
           aria-label={t("sidebar.tree.directoryProjectCount", { name: g.name, count })}
           onMouseEnter={openNow}
           onMouseLeave={scheduleClose}
+          onPointerDownCapture={preventSecondaryPointerFocus}
           onClick={handleClick}
           onContextMenu={(e) => actions.onContextMenuGroup(e, g.id, g.name)}
         >
@@ -835,6 +823,7 @@ function renderFlyoutNodes(nodes: TNode[], depth: number, actions: TreeActions, 
         className="ui-collapsed-flyout-item flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[12px] text-on-surface"
         style={{ paddingLeft: padLeft }}
         title={p.name}
+        onPointerDownCapture={preventSecondaryPointerFocus}
         onClick={() => {
           actions.onOpenProject(p);
           onPick();

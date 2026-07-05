@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import type { SubagentTranscriptSource, TerminalSession, Project } from "../lib/types";
 import { debugConsoleWarn } from "../lib/debugConsole";
-import { sourceLabel as getSyncedSourceLabel, type SyncedHistoryGroup } from "../lib/externalSessionGrouping";
+import { sourceTool, type SyncedHistoryGroup } from "../lib/externalSessionGrouping";
 import { logError, logInfo, logWarn } from "../lib/logger";
 import { isDirectCodexStartupCommand, normalizeDirectCodexStartupCommand, withCodexLightTuiTheme } from "../lib/projectStartupCommand";
 import { getTerminalTheme } from "../lib/terminalThemes";
@@ -791,33 +791,6 @@ export async function createDetachedPtyProcess(options: DetachedPtyLaunchOptions
   };
 }
 
-function externalHistoryPathArgs() {
-  const settings = useSettingsStore.getState();
-  return {
-    claudeConfigDir: settings.claudeHookConfigDir?.trim() || null,
-    codexConfigDir: settings.codexHookConfigDir?.trim() || null,
-  };
-}
-
-function rawString(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (value === null || value === undefined) return "";
-  return String(value);
-}
-
-function rawNumber(value: unknown): number {
-  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  return 0;
-}
-
-function terminalLine(value: string): string {
-  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, "\r\n");
-}
-
 function isCliManagerSyncArtifactText(value: string): boolean {
   const text = value.toLowerCase();
   return (
@@ -825,80 +798,6 @@ function isCliManagerSyncArtifactText(value: string): boolean {
     || text.includes(".cli-manager/synced-history/")
     || text.includes("同步记录已加载")
   );
-}
-
-function rolePrompt(role: string): string {
-  const normalized = role.trim().toLowerCase();
-  if (normalized.includes("user") || normalized.includes("human")) return "›";
-  if (normalized.includes("system")) return "!";
-  if (normalized.includes("tool")) return "↳";
-  return "•";
-}
-
-function formatHistoryTimestamp(value: number): string {
-  if (!value) return "";
-  const millis = value > 1_000_000_000_000 ? value : value * 1000;
-  return new Date(millis).toLocaleString();
-}
-
-async function buildSyncedHistoryInitialOutput(group: SyncedHistoryGroup): Promise<string> {
-  const sortedSessions = [...group.sessions].sort((a, b) => a.updatedAt - b.updatedAt);
-  const chunks: string[] = [
-    `${group.name} · ${getSyncedSourceLabel(sortedSessions[0]?.source ?? "claude")} 同步记录`,
-    `${sortedSessions.length} 个会话`,
-    "",
-  ];
-  let skippedArtifactCount = 0;
-
-  for (const meta of sortedSessions) {
-    try {
-      const detailRaw = await invoke<unknown>("history_get_session", {
-        filePath: meta.filePath,
-        ...externalHistoryPathArgs(),
-        source: meta.source,
-        projectKey: meta.projectKey,
-        aggregateSubtasks: true,
-      });
-      const detail = (detailRaw ?? {}) as Record<string, unknown>;
-      const title = rawString(detail.title).trim() || meta.title || meta.sessionId;
-      const updatedAt = rawNumber(detail.updated_at ?? detail.updatedAt) || meta.updatedAt;
-      const messages = Array.isArray(detail.messages) ? detail.messages : [];
-      const isSyncArtifact = (
-        isCliManagerSyncArtifactText(title)
-        || isCliManagerSyncArtifactText(meta.title)
-        || messages.some((rawMessage) => {
-          const message = (rawMessage ?? {}) as Record<string, unknown>;
-          return isCliManagerSyncArtifactText(rawString(message.content));
-        })
-      );
-      if (isSyncArtifact) {
-        skippedArtifactCount += 1;
-        continue;
-      }
-
-      chunks.push(`--- ${title}${updatedAt ? ` · ${formatHistoryTimestamp(updatedAt)}` : ""}`, "");
-      for (const rawMessage of messages) {
-        const message = (rawMessage ?? {}) as Record<string, unknown>;
-        const role = rawString(message.role) || "assistant";
-        const content = rawString(message.content).trimEnd();
-        if (!content) continue;
-        const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-        chunks.push(`${rolePrompt(role)} ${lines[0] ?? ""}`);
-        for (const line of lines.slice(1)) {
-          chunks.push(`  ${line}`);
-        }
-        chunks.push("");
-      }
-    } catch (err) {
-      chunks.push(`! ${meta.title || meta.sessionId} 读取失败: ${String(err)}`, "");
-    }
-  }
-
-  if (skippedArtifactCount > 0) {
-    chunks.push(`! 已过滤 ${skippedArtifactCount} 个 CLI-Manager 旧同步中间会话。`, "");
-  }
-  chunks.push("");
-  return terminalLine(chunks.join("\n"));
 }
 
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
@@ -1348,6 +1247,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
   openSyncedHistoryPane: async (group, project) => {
     const firstSession = group.sessions[0];
+    if (!firstSession) {
+      throw new Error("同步记录为空。");
+    }
     const label = firstSession?.source === "codex" ? "Codex" : "Claude";
     const existing = get().sessions.find(
       (session) => session.kind === "synced-history" && session.syncedHistory?.key === group.key && get().sessionStatuses[session.id]
@@ -1365,17 +1267,14 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
     const sortedSessions = [...group.sessions].sort((a, b) => b.updatedAt - a.updatedAt);
     const latestSession = sortedSessions[0];
-    if (!latestSession?.startupCmd.trim()) {
-      throw new Error("这条同步记录缺少 resume 命令。");
-    }
-    const cwd = latestSession.cwd || group.cwd || project?.path;
+    const startupCmd = sourceTool(firstSession.source);
+    const cwd = latestSession?.cwd || group.cwd || project?.path;
     const shell = project?.shell && project.shell !== "powershell" ? project.shell : undefined;
     const envVars = project ? parseProjectEnvVars(project) : undefined;
-    const initialTerminalOutput = await buildSyncedHistoryInitialOutput(group);
     const launch = await createDetachedPtyProcess({
       projectId: project?.id,
       cwd,
-      startupCmd: latestSession.startupCmd,
+      startupCmd,
       envVars,
       shell,
     });
@@ -1386,9 +1285,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       cwd,
       shell: launch.shell,
       envVars,
-      startupCmd: launch.startupCmd ?? latestSession.startupCmd,
-      initialTerminalOutput,
-      deferStartupUntilInitialOutput: true,
+      startupCmd: launch.startupCmd ?? startupCmd,
       kind: "synced-history",
       syncedHistory: {
         key: group.key,

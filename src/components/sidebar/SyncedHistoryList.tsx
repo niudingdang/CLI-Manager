@@ -7,7 +7,6 @@ import { useExternalSessionSyncStore } from "../../stores/externalSessionSyncSto
 import { useProjectStore } from "../../stores/projectStore";
 import { useTerminalStore } from "../../stores/terminalStore";
 import {
-  formatRelativeTime,
   groupSyncedExternalSessions,
   sourceLabel,
   sourceTool,
@@ -123,7 +122,6 @@ export function SyncedHistoryList({ fillAvailable = false }: { fillAvailable?: b
                       <span className="ui-synced-history-title">
                         {sourceLabel(session.source)} 同步记录{sessionCount > 1 ? ` · ${sessionCount} 个会话` : ""}
                       </span>
-                      <span className="ui-synced-history-time">{formatRelativeTime(session.updatedAt)}</span>
                     </button>
                   );
                 })()}

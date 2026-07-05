@@ -23,7 +23,6 @@ import { logError } from "../../lib/logger";
 import { SidebarHeader } from "./SidebarHeader";
 import { ProjectTree } from "./ProjectTree";
 import { SidebarFooter } from "./SidebarFooter";
-import { SyncedHistoryList } from "./SyncedHistoryList";
 import { groupSyncedExternalSessions } from "../../lib/externalSessionGrouping";
 import { FileExplorerSidebar } from "../files/FileExplorerSidebar";
 import {
@@ -62,6 +61,31 @@ const SIDEBAR_MIN_WIDTH = 168;
 const SIDEBAR_MAX_WIDTH = 500;
 const SIDEBAR_AUTO_COLLAPSE_BREAKPOINT = 900;
 const IN_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+function preserveSidebarScrollAfterContextMenu(event: ReactMouseEvent, markInternalScroll?: (until: number) => void) {
+  const target = event.currentTarget as HTMLElement | null;
+  const scrollContainer = target?.closest<HTMLElement>(".ui-sidebar-combined-list") ?? null;
+  const scrollTop = scrollContainer?.scrollTop ?? null;
+  const treeItem = target?.closest<HTMLElement>("[data-tree-key]") ?? null;
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement && treeItem?.contains(activeElement)) {
+    activeElement.blur();
+  }
+  if (!scrollContainer || scrollTop === null) return;
+  markInternalScroll?.(Date.now() + 300);
+  const restore = () => {
+    if (scrollContainer.scrollTop !== scrollTop) {
+      scrollContainer.scrollTop = scrollTop;
+    }
+  };
+  window.setTimeout(restore, 0);
+  window.requestAnimationFrame(() => {
+    restore();
+    window.requestAnimationFrame(restore);
+  });
+  window.setTimeout(restore, 50);
+  window.setTimeout(restore, 150);
+}
 
 function isLikelyMacOs() {
   return typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
@@ -177,7 +201,6 @@ export function Sidebar({
   const closeHistory = useHistoryStore((s) => s.closeHistory);
   const openHistory = useHistoryStore((s) => s.openHistory);
   const triggerGlobalSearchFocus = useHistoryStore((s) => s.triggerGlobalSearchFocus);
-  const syncedSessionCount = useExternalSessionSyncStore((s) => s.syncedSessions.length);
   const removeSyncedSessions = useExternalSessionSyncStore((s) => s.removeSyncedSessions);
 
   const initialSidebarWidth = normalizePersistedSidebarWidth(persistedSidebarWidth);
@@ -289,6 +312,7 @@ export function Sidebar({
   >(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const contextMenuOpenedAtRef = useRef(0);
+  const contextMenuInternalScrollUntilRef = useRef(0);
   // 菜单真实位置：渲染后按实测尺寸做翻转/钳制，避免写死高度导致溢出遮挡。
   const [menuPos, setMenuPos] = useState<{ left: number; top: number } | null>(null);
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
@@ -538,6 +562,7 @@ export function Sidebar({
     if (!contextMenu) return;
     const handler = (e: Event) => {
       if (Date.now() - contextMenuOpenedAtRef.current < 120) return;
+      if (e.type === "scroll" && Date.now() < contextMenuInternalScrollUntilRef.current) return;
       if (contextMenuRef.current && contextMenuRef.current.contains(e.target as Node)) return;
       setContextMenu(null);
     };
@@ -681,7 +706,16 @@ export function Sidebar({
 
   const openProjectInternal = async (project: Project, targetPaneId?: string) => {
     const options = buildProjectSplitOptions(project);
-    await createSession(options.projectId, options.cwd, options.title, options.startupCmd, options.envVars, options.shell, targetPaneId);
+
+    await createSession(
+      options.projectId,
+      options.cwd,
+      options.title,
+      options.startupCmd,
+      options.envVars,
+      options.shell,
+      targetPaneId
+    );
     closeHistory();
   };
 
@@ -872,14 +906,19 @@ export function Sidebar({
   const handleContextMenuProject = useCallback((e: ReactMouseEvent, project: Project) => {
     e.preventDefault();
     e.stopPropagation();
+    preserveSidebarScrollAfterContextMenu(e, (until) => {
+      contextMenuInternalScrollUntilRef.current = until;
+    });
     contextMenuOpenedAtRef.current = Date.now();
-    setSelectedId(project.id);
     setContextMenu({ kind: "project", project, x: e.clientX, y: e.clientY });
   }, []);
 
   const handleContextMenuGroup = useCallback((e: ReactMouseEvent, groupId: string, groupName: string) => {
     e.preventDefault();
     e.stopPropagation();
+    preserveSidebarScrollAfterContextMenu(e, (until) => {
+      contextMenuInternalScrollUntilRef.current = until;
+    });
     contextMenuOpenedAtRef.current = Date.now();
     setContextMenu({ kind: "group", groupId, groupName, x: e.clientX, y: e.clientY });
   }, []);
@@ -1072,13 +1111,6 @@ export function Sidebar({
       },
     };
   })();
-  const hasOnlySyncedHistory =
-    syncedSessionCount > 0 &&
-    !initialLoading &&
-    !loadError &&
-    tree.length === 0 &&
-    newGroupParentId !== "__root__";
-
   return (
     <aside
       className={`ui-sidebar-shell relative flex select-none flex-col overflow-hidden ${
@@ -1110,34 +1142,29 @@ export function Sidebar({
         ) : (
           <TreeContext.Provider value={treeActions}>
             <div className="ui-sidebar-combined-list h-full min-h-0 overflow-y-auto overflow-x-hidden">
-              {!hasOnlySyncedHistory && (
-                <ProjectTree
-                  tree={tree}
-                  initialLoading={initialLoading}
-                  loadError={loadError}
-                  collapsed={compactMode ? false : sidebarCollapsed}
-                  density={sidebarDensity}
-                  newGroupParentId={newGroupParentId}
-                  projectScopedTerminalViewEnabled={projectScopedTerminalViewEnabled}
-                  terminalScopeProjectId={terminalScopeProjectId}
-                  onSelectAllTerminalScope={handleSelectAllTerminalScope}
-                  onCreateRootGroup={(name) => handleCreateGroup(null, name)}
-                  onCancelRootGroup={handleCancelNewGroup}
-                  onQuickAddProject={() => {
-                    ensureSidebarExpanded();
-                    setAddToGroupId(null);
-                    setShowAdd(true);
-                  }}
-                  onRetry={() => {
-                    setInitialLoading(true);
-                    void loadProjects();
-                  }}
-                  onExpandSidebar={expandSidebar}
-                  suppressEmptyState={syncedSessionCount > 0}
-                  embedded={!sidebarCollapsed && syncedSessionCount > 0}
-                />
-              )}
-              {!sidebarCollapsed && <SyncedHistoryList fillAvailable={hasOnlySyncedHistory} />}
+              <ProjectTree
+                tree={tree}
+                initialLoading={initialLoading}
+                loadError={loadError}
+                collapsed={compactMode ? false : sidebarCollapsed}
+                density={sidebarDensity}
+                newGroupParentId={newGroupParentId}
+                projectScopedTerminalViewEnabled={projectScopedTerminalViewEnabled}
+                terminalScopeProjectId={terminalScopeProjectId}
+                onSelectAllTerminalScope={handleSelectAllTerminalScope}
+                onCreateRootGroup={(name) => handleCreateGroup(null, name)}
+                onCancelRootGroup={handleCancelNewGroup}
+                onQuickAddProject={() => {
+                  ensureSidebarExpanded();
+                  setAddToGroupId(null);
+                  setShowAdd(true);
+                }}
+                onRetry={() => {
+                  setInitialLoading(true);
+                  void loadProjects();
+                }}
+                onExpandSidebar={expandSidebar}
+              />
             </div>
           </TreeContext.Provider>
         )}

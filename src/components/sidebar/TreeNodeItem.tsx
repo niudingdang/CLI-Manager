@@ -1,22 +1,18 @@
-import { useState, useEffect, useMemo, useRef, memo } from "react";
-import { toast } from "sonner";
+import { useState, useEffect, useRef, memo, type PointerEvent as ReactPointerEvent } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { Project, TreeNode as TNode } from "../../lib/types";
+import type { TreeNode as TNode } from "../../lib/types";
 import { useTreeActions } from "./TreeContext";
-import { Folder, Terminal, Play, ChevronRight, AlertTriangle, Trash2 } from "../icons";
+import { Folder, Terminal, Play, ChevronRight, AlertTriangle } from "../icons";
 import { VendorIcon, inferVendor } from "../VendorIcon";
 import { useI18n } from "../../lib/i18n";
-import { ConfirmDialog } from "../ConfirmDialog";
-import { useExternalSessionSyncStore } from "../../stores/externalSessionSyncStore";
-import { useTerminalStore } from "../../stores/terminalStore";
-import {
-  formatRelativeTime,
-  sourceLabel,
-  sourceTool,
-  type SyncedHistoryGroup,
-} from "../../lib/externalSessionGrouping";
+
+function preventSecondaryPointerFocus(event: ReactPointerEvent<HTMLElement>) {
+  if (event.button !== 2) return;
+  event.preventDefault();
+  event.stopPropagation();
+}
 
 function InlineRename({ initial, onConfirm, onCancel }: { initial: string; onConfirm: (name: string) => void; onCancel: () => void }) {
   const [value, setValue] = useState(initial);
@@ -57,17 +53,6 @@ interface TreeNodeItemProps {
   onFocusNode: (key: string) => void;
   forceExpanded?: boolean;
   sortableEnabled?: boolean;
-  syncedGroupsByProjectId: Map<string, SyncedHistoryGroup[]>;
-}
-
-function isAutoSyncedProject(project: Project, groups: SyncedHistoryGroup[]): boolean {
-  const source = groups[0]?.sessions[0]?.source;
-  if (!source) return false;
-  return (
-    project.name.trim().toLowerCase() === sourceLabel(source).toLowerCase()
-    && project.cli_tool.trim().toLowerCase() === sourceTool(source)
-    && project.startup_cmd.trim() === ""
-  );
 }
 
 function TreeNodeItemImpl({
@@ -78,14 +63,9 @@ function TreeNodeItemImpl({
   onFocusNode,
   forceExpanded = false,
   sortableEnabled = true,
-  syncedGroupsByProjectId,
 }: TreeNodeItemProps) {
   const { t } = useI18n();
   const actions = useTreeActions();
-  const openSyncedHistoryPane = useTerminalStore((state) => state.openSyncedHistoryPane);
-  const removeSyncedSessions = useExternalSessionSyncStore((state) => state.removeSyncedSessions);
-  const [deleteSyncedTarget, setDeleteSyncedTarget] = useState<SyncedHistoryGroup | null>(null);
-  const [deletingSyncedKeys, setDeletingSyncedKeys] = useState<Set<string>>(new Set());
   const itemId = node.type === "project" ? node.project.id : node.group.id;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: itemId, disabled: !sortableEnabled });
   const sortableStyle = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
@@ -93,90 +73,6 @@ function TreeNodeItemImpl({
   const indentBase = compact ? 6 : 8;
   const indentStep = compact ? 14 : 16;
   const paddingLeft = indentBase + depth * indentStep;
-  const projectSyncedGroups = node.type === "project" ? syncedGroupsByProjectId.get(node.project.id) ?? [] : [];
-  const getVisibleSyncedGroups = (groups: SyncedHistoryGroup[]) =>
-    groups
-      .map((group) => ({
-        ...group,
-        sessions: group.sessions.filter((session) => !deletingSyncedKeys.has(session.key)),
-      }))
-      .filter((group) => group.sessions.length > 0);
-  const visibleSyncedGroups = useMemo(
-    () =>
-      getVisibleSyncedGroups(projectSyncedGroups),
-    [deletingSyncedKeys, projectSyncedGroups]
-  );
-
-  const openSyncedGroup = async (project: Project, group: SyncedHistoryGroup) => {
-    try {
-      await openSyncedHistoryPane(group, project);
-    } catch (err) {
-      toast.error("打开同步记录失败", { description: String(err) });
-    }
-  };
-
-  const confirmDeleteSyncedGroup = async () => {
-    if (!deleteSyncedTarget) return;
-    const keys = deleteSyncedTarget.sessions.map((session) => session.key);
-    setDeleteSyncedTarget(null);
-    setDeletingSyncedKeys((prev) => new Set([...prev, ...keys]));
-    try {
-      await removeSyncedSessions(keys);
-      toast.success("同步项目已删除");
-    } catch (err) {
-      setDeletingSyncedKeys((prev) => {
-        const next = new Set(prev);
-        keys.forEach((key) => next.delete(key));
-        return next;
-      });
-      toast.error("删除同步项目失败", { description: String(err) });
-    }
-  };
-
-  const renderSyncedGroups = (project: Project, groups: SyncedHistoryGroup[], indent: number) => {
-    if (groups.length === 0) return null;
-    return (
-      <div className="ui-tree-synced-sessions" style={{ paddingLeft: indent }}>
-        {groups.map((group) => {
-          const session = group.sessions[0];
-          const vendor = inferVendor(sourceTool(session.source));
-          const sessionCount = group.sessions.length;
-          return (
-            <div key={group.key} className="ui-tree-synced-session">
-              <button
-                type="button"
-                className="ui-tree-synced-session-main ui-focus-ring"
-                title={`${sourceLabel(session.source)}: ${session.title}`}
-                onClick={() => {
-                  void openSyncedGroup(project, group);
-                }}
-              >
-                <span className="ui-tree-synced-vendor">
-                  <VendorIcon vendor={vendor} size={15} />
-                </span>
-                <span className="ui-tree-synced-title">
-                  {sourceLabel(session.source)} 同步记录{sessionCount > 1 ? ` · ${sessionCount} 个会话` : ""}
-                </span>
-                <span className="ui-tree-synced-time">{formatRelativeTime(session.updatedAt)}</span>
-              </button>
-              <button
-                type="button"
-                className="ui-tree-synced-delete ui-focus-ring"
-                title="删除同步项目"
-                aria-label={`删除同步项目 ${group.name}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDeleteSyncedTarget(group);
-                }}
-              >
-                <Trash2 size={13} strokeWidth={1.8} />
-              </button>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
 
   if (node.type === "project") {
     const p = node.project;
@@ -203,6 +99,7 @@ function TreeNodeItemImpl({
         aria-level={depth + 1}
         aria-selected={isSelected || isMultiSelected}
         tabIndex={focusedNodeKey === treeKey ? 0 : -1}
+        onPointerDownCapture={preventSecondaryPointerFocus}
         onFocus={() => onFocusNode(treeKey)}
       >
         <div
@@ -213,6 +110,9 @@ function TreeNodeItemImpl({
           data-status={status ?? "idle"}
           data-invalid={pathInvalid ? "true" : "false"}
           style={{ paddingLeft, paddingRight: compact ? 8 : 10 }}
+          onMouseDown={(e) => {
+            if (e.button === 2) e.preventDefault();
+          }}
           onClick={(e) => actions.onSelectProject(e, p)}
           onDoubleClick={() => actions.onOpenProject(p)}
           onContextMenu={(e) => actions.onContextMenuProject(e, p)}
@@ -265,19 +165,6 @@ function TreeNodeItemImpl({
             </button>
           </span>
         </div>
-        {renderSyncedGroups(p, visibleSyncedGroups, paddingLeft + indentStep)}
-        <ConfirmDialog
-          open={Boolean(deleteSyncedTarget)}
-          title={`删除同步项目“${deleteSyncedTarget?.name ?? ""}”？`}
-          message="这只会从侧边栏移除记录，不会删除原始聊天文件。"
-          confirmText="删除"
-          cancelText="取消"
-          danger
-          onConfirm={() => {
-            void confirmDeleteSyncedGroup();
-          }}
-          onClose={() => setDeleteSyncedTarget(null)}
-        />
       </div>
     );
   }
@@ -320,6 +207,7 @@ function TreeNodeItemImpl({
       aria-expanded={isOpen}
       aria-selected={false}
       tabIndex={focusedNodeKey === treeKey ? 0 : -1}
+      onPointerDownCapture={preventSecondaryPointerFocus}
       onFocus={() => onFocusNode(treeKey)}
     >
       <div className={`ui-tree-group-shell ${compact ? "my-0.5" : "my-1"}`} style={{ marginLeft: depth === 0 ? 0 : 2 }}>
@@ -332,6 +220,9 @@ function TreeNodeItemImpl({
           data-open={isOpen ? "true" : "false"}
           data-drop-target={isOverInto ? "true" : "false"}
           style={{ paddingLeft, paddingRight: compact ? 8 : 10, color: "var(--text-secondary)" }}
+          onMouseDown={(e) => {
+            if (e.button === 2) e.preventDefault();
+          }}
           onClick={() => {
             if (!forceExpanded) actions.toggleCollapsed(g.id);
           }}
@@ -362,58 +253,27 @@ function TreeNodeItemImpl({
           <div className="tree-collapse" data-open="true">
             <div className="tree-collapse-inner" role="group">
               <SortableContext
-                items={node.children
-                  .filter((child) => {
-                    if (child.type !== "project") return true;
-                    const childGroups = getVisibleSyncedGroups(syncedGroupsByProjectId.get(child.project.id) ?? []);
-                    return !isAutoSyncedProject(child.project, childGroups);
-                  })
-                  .map((c) => c.type === "group" ? c.group.id : c.project.id)}
+                items={node.children.map((c) => c.type === "group" ? c.group.id : c.project.id)}
                 strategy={verticalListSortingStrategy}
               >
                 <div className={`${compact ? "ml-2 space-y-0.5 pb-0.5" : "ml-2.5 space-y-0.5 pb-1"}`}>
-                  {node.children.map((child) => {
-                    if (child.type === "project") {
-                      const childGroups = getVisibleSyncedGroups(syncedGroupsByProjectId.get(child.project.id) ?? []);
-                      if (isAutoSyncedProject(child.project, childGroups)) {
-                        return (
-                          <div key={`synced:${child.project.id}`}>
-                            {renderSyncedGroups(child.project, childGroups, paddingLeft + indentStep)}
-                          </div>
-                        );
-                      }
-                    }
-                    return (
-                      <TreeNodeItem
-                        key={child.type === "group" ? `g:${child.group.id}` : `p:${child.project.id}`}
-                        node={child}
-                        depth={depth + 1}
-                        density={density}
-                        focusedNodeKey={focusedNodeKey}
-                        onFocusNode={onFocusNode}
-                        forceExpanded={forceExpanded}
-                        sortableEnabled={sortableEnabled}
-                        syncedGroupsByProjectId={syncedGroupsByProjectId}
-                      />
-                    );
-                  })}
+                  {node.children.map((child) => (
+                    <TreeNodeItem
+                      key={child.type === "group" ? `g:${child.group.id}` : `p:${child.project.id}`}
+                      node={child}
+                      depth={depth + 1}
+                      density={density}
+                      focusedNodeKey={focusedNodeKey}
+                      onFocusNode={onFocusNode}
+                      forceExpanded={forceExpanded}
+                      sortableEnabled={sortableEnabled}
+                    />
+                  ))}
                 </div>
               </SortableContext>
             </div>
           </div>
         )}
-        <ConfirmDialog
-          open={Boolean(deleteSyncedTarget)}
-          title={`删除同步项目“${deleteSyncedTarget?.name ?? ""}”？`}
-          message="这只会从侧边栏移除记录，不会删除原始聊天文件。"
-          confirmText="删除"
-          cancelText="取消"
-          danger
-          onConfirm={() => {
-            void confirmDeleteSyncedGroup();
-          }}
-          onClose={() => setDeleteSyncedTarget(null)}
-        />
       </div>
     </div>
   );
