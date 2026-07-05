@@ -33,6 +33,7 @@ import { useUpdateStore } from "./stores/updateStore";
 import { useReplayStore } from "./stores/replayStore";
 import { useTerminalStore, type CliHookPayload } from "./stores/terminalStore";
 import { useModelPricingStore } from "./stores/modelPricingStore";
+import { useWorktreeStore } from "./stores/worktreeStore";
 import { debugConsoleWarn } from "./lib/debugConsole";
 import { createPerfMarker, logWarn } from "./lib/logger";
 import { getContrastRatioFromHex, MIN_APPLY_CONTRAST_RATIO } from "./lib/contrast";
@@ -619,8 +620,10 @@ function App() {
         logWarn("Failed to preload model pricing", err);
       });
 
-      // 2. 加载项目列表
+      // 2. 加载项目列表与 worktree 记录
       await useProjectStore.getState().fetchAll("startup");
+      await useWorktreeStore.getState().loadWorktrees();
+      await useWorktreeStore.getState().markMissingWorktrees();
 
       // 3. 启动时不恢复历史终端，避免重建 PTY 并重跑 startupCmd。
       await useSessionStore.getState().clear();

@@ -20,6 +20,7 @@ import { SortableContext, arrayMove, horizontalListSortingStrategy, useSortable,
 import { CSS } from "@dnd-kit/utilities";
 import { useTerminalStore, type SplitTerminalOptions, type TabNotificationState } from "../stores/terminalStore";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useWorktreeStore } from "../stores/worktreeStore";
 import { useProjectStore } from "../stores/projectStore";
 import { isProjectFileDirty, useFileExplorerStore } from "../stores/fileExplorerStore";
 import { useI18n, type TranslationKey } from "../lib/i18n";
@@ -46,12 +47,15 @@ import {
 } from "./terminal/TerminalSidePanel";
 import { SubagentTranscriptView } from "./terminal/SubagentTranscriptView";
 import { SessionReplayPanel } from "./terminal/SessionReplayPanel";
+import { WorktreeFinishDialog } from "./worktree/WorktreeFinishDialog";
 import { FileEditorPane } from "./files/FileEditorPane";
 import { FileExplorerSidebar } from "./files/FileExplorerSidebar";
 import { openWindowsTerminal } from "../lib/externalTerminal";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { normalizeDirectCodexStartupCommand, resolveProjectStartupCommand } from "../lib/projectStartupCommand";
 import { parseProjectEnvVars } from "../lib/providerSwitching";
 import { Activity, Terminal, Plus, ListClockIcon, X, Copy, Maximize2, Minimize2, ChevronDown, ChevronRight, BarChart3, GitBranch, Folder, Check } from "./icons";
+import { WorktreeIcon } from "./WorktreeIcon";
 import { VendorIcon, inferVendor, type VendorKey } from "./VendorIcon";
 import { EmptyState } from "./ui/EmptyState";
 import { useHistoryStore } from "../stores/historyStore";
@@ -60,7 +64,7 @@ import {
   TERMINAL_TAB_CLOSE_REQUEST_EVENT,
   type TerminalTabCloseRequestDetail,
 } from "../lib/terminalCloseConfirm";
-import type { HistorySourceFilter, Project, TerminalSession, TreeNode } from "../lib/types";
+import type { HistorySourceFilter, Project, TerminalSession, TreeNode, WorktreeRecord } from "../lib/types";
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -74,6 +78,7 @@ import {
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Button } from "./ui/button";
 import { Portal } from "./ui/Portal";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { getTerminalTheme } from "../lib/terminalThemes";
 import { getTerminalSidePanelSkinStyle } from "./stats/termStatsUi";
 import { resolveProjectForSession } from "../lib/terminalProject";
@@ -290,6 +295,8 @@ interface SortableTabProps {
   isEditing: boolean;
   notification: TabNotificationState;
   vendor?: VendorKey | null;
+  worktree?: WorktreeRecord | null;
+  worktreeMenuContent?: (closeMenu: () => void) => ReactNode;
   hoverInfo: TerminalTabHoverInfo;
   onActivate: () => void;
   onClose: (anchor?: SplitPickerAnchor) => void;
@@ -310,6 +317,8 @@ function SortableTab({
   isEditing,
   notification,
   vendor,
+  worktree,
+  worktreeMenuContent,
   hoverInfo,
   onActivate,
   onClose,
@@ -330,6 +339,7 @@ function SortableTab({
   const statusLabel = t(TAB_NOTIFICATION_LABELS[notification]);
   const tabMinWidthClass = "min-w-[92px]";
   const [hoverCardPosition, setHoverCardPosition] = useState<{ left: number; top: number } | null>(null);
+  const [worktreePopoverOpen, setWorktreePopoverOpen] = useState(false);
   const hoverOpenTimerRef = useRef<number | null>(null);
   const hoverCloseTimerRef = useRef<number | null>(null);
   const terminalTabHoverInfoEnabled = useSettingsStore((s) => s.terminalTabHoverInfoEnabled);
@@ -437,6 +447,7 @@ function SortableTab({
   }, [setNodeRef]);
 
   const getTabAnchor = useCallback(() => contextMenuPointRef.current ?? tabElementRef.current?.getBoundingClientRect(), []);
+  const closeWorktreePopover = useCallback(() => setWorktreePopoverOpen(false), []);
 
   return (
     <>
@@ -475,6 +486,31 @@ function SortableTab({
             <span className="ui-terminal-tab-vendor inline-flex shrink-0 items-center" aria-hidden="true">
               <VendorIcon vendor={vendor} size={14} />
             </span>
+          )}
+          {worktree && (
+            <Popover open={worktreePopoverOpen} onOpenChange={setWorktreePopoverOpen}>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  className="ui-worktree-tab-badge inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none"
+                  title={`${worktree.name}\n${worktree.branch}\n${worktree.path}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    hideHoverCard();
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  <WorktreeIcon className="h-3 w-3" />
+                  <span>WT</span>
+                </button>
+              </PopoverTrigger>
+              {worktreeMenuContent && (
+                <PopoverContent className="terminal-skin context-menu min-w-[160px] p-1">
+                  {worktreeMenuContent(closeWorktreePopover)}
+                </PopoverContent>
+              )}
+            </Popover>
           )}
           {isEditing ? (
             <input
@@ -631,6 +667,7 @@ interface PaneTabBarProps {
   pane: TerminalPaneLeaf;
   sessions: TerminalSession[];
   projects: Project[];
+  worktrees: WorktreeRecord[];
   allPanes: TerminalPaneLeaf[];
   activeSessionId: string | null;
   editingSessionId: string | null;
@@ -656,6 +693,11 @@ interface PaneTabBarProps {
   onHideBackground: (sessionId: string) => void;
   onShowBackground: (sessionId: string) => void;
   onTogglePaneFullscreen: (paneId: string) => void;
+  onOpenWorktreeChanges: (sessionId: string) => void;
+  onFinishWorktree: (project: Project, worktree: WorktreeRecord) => void;
+  onInstallWorktreeDeps: (project: Project, worktree: WorktreeRecord) => void;
+  onDiscardWorktree: (project: Project, worktree: WorktreeRecord) => void;
+  onOpenWorktreeDirectory: (worktree: WorktreeRecord) => void;
   variant?: "global" | "pane";
 }
 
@@ -663,6 +705,7 @@ function PaneTabBar({
   pane,
   sessions,
   projects,
+  worktrees,
   allPanes,
   activeSessionId,
   editingSessionId,
@@ -684,6 +727,11 @@ function PaneTabBar({
   onHideBackground,
   onShowBackground,
   onTogglePaneFullscreen,
+  onOpenWorktreeChanges,
+  onFinishWorktree,
+  onInstallWorktreeDeps,
+  onDiscardWorktree,
+  onOpenWorktreeDirectory,
   variant = "pane",
   resolvedTheme,
   terminalThemeName,
@@ -714,6 +762,11 @@ function PaneTabBar({
     for (const project of projects) next.set(project.id, project);
     return next;
   }, [projects]);
+  const worktreeById = useMemo(() => {
+    const next = new Map<string, WorktreeRecord>();
+    for (const worktree of worktrees) next.set(worktree.id, worktree);
+    return next;
+  }, [worktrees]);
   const paneSessions = pane.sessionIds
     .map((id) => sessions.find((session) => session.id === id))
     .filter((session): session is TerminalSession => Boolean(session));
@@ -934,6 +987,25 @@ function PaneTabBar({
               isEditing={editingSessionId === session.id}
               notification={tabNotifications[session.id] ?? "none"}
               vendor={inferSessionVendor(session)}
+              worktree={session.worktreeId ? worktreeById.get(session.worktreeId) ?? null : null}
+              worktreeMenuContent={session.worktreeId && worktreeById.get(session.worktreeId) && session.projectId && projectById.get(session.projectId) ? (closeMenu) => {
+                const project = projectById.get(session.projectId!);
+                const activeWorktree = worktreeById.get(session.worktreeId!);
+                if (!project || !activeWorktree) return null;
+                const runAndClose = (action: () => void) => {
+                  closeMenu();
+                  action();
+                };
+                return (
+                  <>
+                    <button type="button" className="context-menu-item w-full" onClick={() => runAndClose(() => onOpenWorktreeChanges(session.id))}>{t("worktree.menu.viewChanges")}</button>
+                    <button type="button" className="context-menu-item w-full" onClick={() => runAndClose(() => onFinishWorktree(project, activeWorktree))}>{t("worktree.menu.finish")}</button>
+                    <button type="button" className="context-menu-item w-full" onClick={() => runAndClose(() => onInstallWorktreeDeps(project, activeWorktree))}>{t("worktree.menu.installDeps")}</button>
+                    <button type="button" className="context-menu-item w-full" onClick={() => runAndClose(() => onOpenWorktreeDirectory(activeWorktree))}>{t("worktree.menu.openDirectory")}</button>
+                    <button type="button" className="context-menu-item danger w-full" onClick={() => runAndClose(() => onDiscardWorktree(project, activeWorktree))}>{t("worktree.menu.discard")}</button>
+                  </>
+                );
+              } : undefined}
               hoverInfo={buildTerminalTabHoverInfo(session, session.projectId ? projectById.get(session.projectId) : undefined)}
               onActivate={() => onActivateSession(session.id)}
               onClose={(anchor) => closePaneSessions([session.id], anchor)}
@@ -956,6 +1028,16 @@ function PaneTabBar({
                     ) : (
                       <ContextMenuItem onSelect={() => onHideBackground(session.id)}>{t("terminal.tab.hideBackground")}</ContextMenuItem>
                     )
+                  )}
+                  {session.worktreeId && worktreeById.get(session.worktreeId) && session.projectId && projectById.get(session.projectId) && (
+                    <>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={() => onOpenWorktreeChanges(session.id)}>{t("worktree.menu.viewChanges")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => onFinishWorktree(projectById.get(session.projectId!)!, worktreeById.get(session.worktreeId!)!)}>{t("worktree.menu.finish")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => onInstallWorktreeDeps(projectById.get(session.projectId!)!, worktreeById.get(session.worktreeId!)!)}>{t("worktree.menu.installDeps")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => onOpenWorktreeDirectory(worktreeById.get(session.worktreeId!)!)}>{t("worktree.menu.openDirectory")}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => onDiscardWorktree(projectById.get(session.projectId!)!, worktreeById.get(session.worktreeId!)!)}>{t("worktree.menu.discard")}</ContextMenuItem>
+                    </>
                   )}
                   <ContextMenuSeparator />
                   <ContextMenuItem onSelect={() => onOpenSplitPicker(session.id, "horizontal", getAnchor())}>
@@ -1068,6 +1150,7 @@ interface PaneLeafViewProps {
   pane: TerminalPaneLeaf;
   sessions: TerminalSession[];
   projects: Project[];
+  worktrees: WorktreeRecord[];
   allPanes: TerminalPaneLeaf[];
   activeSessionId: string | null;
   historyActive: boolean;
@@ -1099,6 +1182,11 @@ interface PaneLeafViewProps {
   onHideBackground: (sessionId: string) => void;
   onShowBackground: (sessionId: string) => void;
   onTogglePaneFullscreen: (paneId: string) => void;
+  onOpenWorktreeChanges: (sessionId: string) => void;
+  onFinishWorktree: (project: Project, worktree: WorktreeRecord) => void;
+  onInstallWorktreeDeps: (project: Project, worktree: WorktreeRecord) => void;
+  onDiscardWorktree: (project: Project, worktree: WorktreeRecord) => void;
+  onOpenWorktreeDirectory: (worktree: WorktreeRecord) => void;
   hideTabBar?: boolean;
 }
 
@@ -1106,6 +1194,7 @@ function PaneLeafView({
   pane,
   sessions,
   projects,
+  worktrees,
   allPanes,
   activeSessionId,
   historyActive,
@@ -1137,6 +1226,11 @@ function PaneLeafView({
   onHideBackground,
   onShowBackground,
   onTogglePaneFullscreen,
+  onOpenWorktreeChanges,
+  onFinishWorktree,
+  onInstallWorktreeDeps,
+  onDiscardWorktree,
+  onOpenWorktreeDirectory,
   hideTabBar = false,
 }: PaneLeafViewProps) {
   const paneSessions = pane.sessionIds
@@ -1150,6 +1244,7 @@ function PaneLeafView({
           pane={pane}
           sessions={sessions}
           projects={projects}
+          worktrees={worktrees}
           allPanes={allPanes}
           activeSessionId={activeSessionId}
           editingSessionId={editingSessionId}
@@ -1171,6 +1266,11 @@ function PaneLeafView({
           onHideBackground={onHideBackground}
           onShowBackground={onShowBackground}
           onTogglePaneFullscreen={onTogglePaneFullscreen}
+          onOpenWorktreeChanges={onOpenWorktreeChanges}
+          onFinishWorktree={onFinishWorktree}
+          onInstallWorktreeDeps={onInstallWorktreeDeps}
+          onDiscardWorktree={onDiscardWorktree}
+          onOpenWorktreeDirectory={onOpenWorktreeDirectory}
           resolvedTheme={resolvedTheme}
           terminalThemeName={terminalThemeName}
           lightThemePalette={lightThemePalette}
@@ -1337,6 +1437,7 @@ function arePaneLeafViewPropsEqual(prevProps: PaneLeafViewProps, nextProps: Pane
 
   if (didPaneSessionsChange(prevProps, nextProps)) return false;
   if (didPaneProjectsChange(prevProps, nextProps)) return false;
+  if (prevProps.worktrees !== nextProps.worktrees) return false;
   if (didPaneNotificationsChange(prevProps.tabNotifications, nextProps.tabNotifications, nextProps.pane.sessionIds)) return false;
   if (didPaneHiddenBackgroundChange(prevProps.hiddenBackgroundSessionIds, nextProps.hiddenBackgroundSessionIds, nextProps.pane.sessionIds)) return false;
 
@@ -1353,7 +1454,12 @@ function arePaneLeafViewPropsEqual(prevProps: PaneLeafViewProps, nextProps: Pane
     prevProps.onMoveToPane === nextProps.onMoveToPane &&
     prevProps.onHideBackground === nextProps.onHideBackground &&
     prevProps.onShowBackground === nextProps.onShowBackground &&
-    prevProps.onTogglePaneFullscreen === nextProps.onTogglePaneFullscreen
+    prevProps.onTogglePaneFullscreen === nextProps.onTogglePaneFullscreen &&
+    prevProps.onOpenWorktreeChanges === nextProps.onOpenWorktreeChanges &&
+    prevProps.onFinishWorktree === nextProps.onFinishWorktree &&
+    prevProps.onInstallWorktreeDeps === nextProps.onInstallWorktreeDeps &&
+    prevProps.onDiscardWorktree === nextProps.onDiscardWorktree &&
+    prevProps.onOpenWorktreeDirectory === nextProps.onOpenWorktreeDirectory
   );
 }
 
@@ -1435,6 +1541,10 @@ function SplitProjectPicker({ picker, tree, menuStyle, onSelectEmpty, onSelectPr
           </span>
         </button>
       );
+    }
+
+    if (node.type === "worktree") {
+      return null;
     }
 
     const group = node.group;
@@ -1616,6 +1726,10 @@ export function TerminalTabs({
       tree: s.tree,
     }))
   );
+  const worktrees = useWorktreeStore((s) => s.worktrees);
+  const checkWorktreeDeps = useWorktreeStore((s) => s.checkDeps);
+  const dismissWorktreeDepsPrompt = useWorktreeStore((s) => s.dismissDepsPrompt);
+  const removeWorktree = useWorktreeStore((s) => s.removeWorktree);
   const useExternalTerminal = useSettingsStore((s) => s.useExternalTerminal);
   const fontSize = useSettingsStore((s) => s.fontSize);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
@@ -1654,6 +1768,8 @@ export function TerminalTabs({
   const [gitOpen, setGitOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [finishTarget, setFinishTarget] = useState<{ project: Project; worktree: WorktreeRecord } | null>(null);
+  const [discardTarget, setDiscardTarget] = useState<{ project: Project; worktree: WorktreeRecord } | null>(null);
   const [activeToolbarDragId, setActiveToolbarDragId] = useState<string | null>(null);
   const paneFullscreenStartedFromGlobalRef = useRef(false);
   const previousFullscreenRef = useRef(fullscreen);
@@ -1883,6 +1999,43 @@ export function TerminalTabs({
     setActiveWorkspaceTab("terminal");
   }, [closeHistory, createSession, scopedProject, useExternalTerminal]);
 
+  const handleInstallWorktreeDeps = useCallback((project: Project, worktree: WorktreeRecord) => {
+    void checkWorktreeDeps(worktree).then((deps) => {
+      if (!deps.needsInstall || !deps.command) {
+        toast.info(t("worktree.deps.notNeeded"));
+        return;
+      }
+      const options = buildProjectSplitOptions(project);
+      void dismissWorktreeDepsPrompt(worktree.id);
+      void createSession(
+        options.projectId,
+        worktree.path,
+        t("worktree.deps.installTitle", { name: worktree.name }),
+        deps.command,
+        options.envVars,
+        options.shell,
+        undefined,
+        worktree.id,
+      );
+    }).catch((err) => toast.error(t("worktree.deps.checkFailed"), { description: String(err) }));
+  }, [checkWorktreeDeps, createSession, dismissWorktreeDepsPrompt, t]);
+
+  const handleOpenWorktreeDirectory = useCallback((worktree: WorktreeRecord) => {
+    void openPath(worktree.path).catch((err) => toast.error(t("sidebar.toast.openDirectoryFailed"), { description: String(err) }));
+  }, [t]);
+
+  const handleOpenWorktreeChanges = useCallback((sessionId: string) => {
+    closeHistory();
+    setActiveWorkspaceTab("terminal");
+    setActive(sessionId);
+    if (sidePanelMerged) {
+      setSidePanelTab("git");
+      setSidePanelOpen(true);
+      return;
+    }
+    setGitOpen(true);
+  }, [closeHistory, setActive, sidePanelMerged]);
+
   const handleDuplicateSession = useCallback((session: TerminalSession) => {
     void createSession(
       session.projectId,
@@ -1891,6 +2044,8 @@ export function TerminalTabs({
       normalizeDirectCodexStartupCommand(session.startupCmd),
       session.envVars ? { ...session.envVars } : undefined,
       session.shell ?? undefined,
+      undefined,
+      session.worktreeId,
     ).then(() => {
       closeHistory();
       setActiveWorkspaceTab("terminal");
@@ -2543,6 +2698,7 @@ export function TerminalTabs({
       pane={pane}
       sessions={visibleSessions}
       projects={projects}
+      worktrees={worktrees}
       allPanes={allPanes}
       activeSessionId={effectiveActiveSessionId}
       historyActive={historyActive}
@@ -2577,6 +2733,11 @@ export function TerminalTabs({
       onHideBackground={hideBackgroundForSession}
       onShowBackground={showBackgroundForSession}
       onTogglePaneFullscreen={handleTogglePaneFullscreen}
+      onOpenWorktreeChanges={handleOpenWorktreeChanges}
+      onFinishWorktree={(project, worktree) => setFinishTarget({ project, worktree })}
+      onInstallWorktreeDeps={handleInstallWorktreeDeps}
+      onDiscardWorktree={(project, worktree) => setDiscardTarget({ project, worktree })}
+      onOpenWorktreeDirectory={handleOpenWorktreeDirectory}
       hideTabBar={false}
     />
   ), [
@@ -2593,6 +2754,9 @@ export function TerminalTabs({
     handleNewTab,
     handleDuplicateSession,
     handleOpenSplitPicker,
+    handleOpenWorktreeChanges,
+    handleOpenWorktreeDirectory,
+    handleInstallWorktreeDeps,
     handleTogglePaneFullscreen,
     hiddenBackgroundSessionIds,
     hideBackgroundForSession,
@@ -2604,6 +2768,7 @@ export function TerminalTabs({
     resolvedTheme,
     effectiveActiveSessionId,
     visibleSessions,
+    worktrees,
     showBackgroundForSession,
     tabNotifications,
     terminalThemeBackground,
@@ -2633,6 +2798,29 @@ export function TerminalTabs({
         onConfirm={confirmCloseSessions}
         onClose={cancelCloseSessions}
         shouldIgnoreOutsideInteraction={shouldIgnoreCloseConfirmOutsideInteraction}
+      />
+      <WorktreeFinishDialog
+        open={!!finishTarget}
+        project={finishTarget?.project ?? null}
+        worktree={finishTarget?.worktree ?? null}
+        onClose={() => setFinishTarget(null)}
+      />
+      <ConfirmDialog
+        open={!!discardTarget}
+        title={t("worktree.discard.title", { name: discardTarget?.worktree.name ?? "" })}
+        message={t("worktree.discard.message", { branch: discardTarget?.worktree.branch ?? "" })}
+        confirmText={t("worktree.discard.confirm")}
+        cancelText={t("common.cancel")}
+        danger
+        onConfirm={() => {
+          if (discardTarget) {
+            void removeWorktree(discardTarget.worktree, true).catch((err) => {
+              toast.error(t("worktree.toast.discardFailed"), { description: String(err) });
+            });
+          }
+          setDiscardTarget(null);
+        }}
+        onClose={() => setDiscardTarget(null)}
       />
 
       <div className="relative flex-1 min-h-0 overflow-hidden">

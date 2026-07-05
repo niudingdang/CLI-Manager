@@ -1,12 +1,12 @@
 import { DndContext, DragOverlay, PointerSensor, closestCenter, useSensor, useSensors, type CollisionDetection, type DragStartEvent } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import type { TreeNode as TNode } from "../../lib/types";
+import type { Project, TreeNode as TNode } from "../../lib/types";
 import type { SessionStatus } from "../../stores/terminalStore";
 import { SidebarSkeleton } from "../ui/Skeleton";
 import { EmptyState } from "../ui/EmptyState";
 import { Popover, PopoverAnchor, PopoverContent } from "../ui/popover";
-import { Folder, Plus, Terminal } from "../icons";
+import { Folder, GitBranch, Plus, Terminal } from "../icons";
 import { VendorIcon, inferVendor } from "../VendorIcon";
 import { TreeNodeItem } from "./TreeNodeItem";
 import { useTreeActions, type TreeActions } from "./TreeContext";
@@ -37,23 +37,27 @@ const STATUS_COLORS: Record<SessionStatus, string> = {
 
 function countProjects(node: TNode): number {
   if (node.type === "project") return 1;
+  if (node.type === "worktree") return 0;
   return node.children.reduce((sum, child) => sum + countProjects(child), 0);
 }
 
 interface VisibleTreeNode {
   key: string;
-  kind: "all-terminals" | "group" | "project";
+  kind: "all-terminals" | "group" | "project" | "worktree";
   parentGroupKey: string | null;
   groupId?: string;
   groupName?: string;
   projectId?: string;
+  worktreeId?: string;
   isOpen?: boolean;
   hasChildren?: boolean;
   firstChildKey?: string | null;
 }
 
 function nodeKey(node: TNode): string {
-  return node.type === "group" ? `g:${node.group.id}` : `p:${node.project.id}`;
+  if (node.type === "group") return `g:${node.group.id}`;
+  if (node.type === "worktree") return `wt:${node.worktree.id}`;
+  return `p:${node.project.id}`;
 }
 
 function isProjectSearchKey(key: string): boolean {
@@ -80,6 +84,20 @@ function filterTreeNodes(nodes: TNode[], query: string): TNode[] {
   for (const node of nodes) {
     if (node.type === "project") {
       if (matchesProjectQuery(node.project, normalizedQuery)) {
+        result.push(node);
+        continue;
+      }
+      const worktrees = (node.worktrees ?? []).filter((worktree) =>
+        worktree.name.toLowerCase().includes(normalizedQuery) || worktree.branch.toLowerCase().includes(normalizedQuery)
+      );
+      if (worktrees.length > 0) {
+        result.push({ ...node, worktrees });
+      }
+      continue;
+    }
+
+    if (node.type === "worktree") {
+      if (node.worktree.name.toLowerCase().includes(normalizedQuery) || node.worktree.branch.toLowerCase().includes(normalizedQuery)) {
         result.push(node);
       }
       continue;
@@ -174,12 +192,32 @@ function flattenVisibleTree(
       continue;
     }
 
+    if (node.type === "worktree") {
+      out.push({
+        key: `wt:${node.worktree.id}`,
+        kind: "worktree",
+        parentGroupKey,
+        projectId: node.project.id,
+        worktreeId: node.worktree.id,
+      });
+      continue;
+    }
+
     out.push({
       key: `p:${node.project.id}`,
       kind: "project",
       parentGroupKey,
       projectId: node.project.id,
     });
+    for (const worktree of node.worktrees ?? []) {
+      out.push({
+        key: `wt:${worktree.id}`,
+        kind: "worktree",
+        parentGroupKey,
+        projectId: node.project.id,
+        worktreeId: worktree.id,
+      });
+    }
   }
   return out;
 }
@@ -229,11 +267,29 @@ export function ProjectTree({
     return map;
   }, [visibleNodes]);
   const projectById = useMemo(() => {
-    const map = new Map<string, TNode>();
+    const map = new Map<string, Extract<TNode, { type: "project" }>>();
     const walk = (nodes: TNode[]) => {
       for (const node of nodes) {
         if (node.type === "project") {
           map.set(node.project.id, node);
+        } else if (node.type === "group") {
+          walk(node.children);
+        }
+      }
+    };
+    walk(tree);
+    return map;
+  }, [tree]);
+  const worktreeById = useMemo(() => {
+    const map = new Map<string, { project: Project; worktree: Extract<TNode, { type: "worktree" }>["worktree"] }>();
+    const walk = (nodes: TNode[]) => {
+      for (const node of nodes) {
+        if (node.type === "project") {
+          for (const worktree of node.worktrees ?? []) {
+            map.set(worktree.id, { project: node.project, worktree });
+          }
+        } else if (node.type === "worktree") {
+          map.set(node.worktree.id, { project: node.project, worktree: node.worktree });
         } else {
           walk(node.children);
         }
@@ -386,6 +442,10 @@ export function ProjectTree({
           actions.onOpenProject(projectNode.project);
         }
       }
+      if (current.kind === "worktree" && current.worktreeId) {
+        const item = worktreeById.get(current.worktreeId);
+        if (item) actions.onOpenWorktree(item.project, item.worktree);
+      }
       return;
     }
 
@@ -417,6 +477,10 @@ export function ProjectTree({
           actions.onSelectProjectByKeyboard(projectNode.project);
         }
       }
+      if (current.kind === "worktree" && current.worktreeId) {
+        const item = worktreeById.get(current.worktreeId);
+        if (item) actions.onOpenWorktree(item.project, item.worktree);
+      }
       if (current.kind === "group" && current.groupId && !forceExpanded) {
         actions.toggleCollapsed(current.groupId);
       }
@@ -440,6 +504,7 @@ export function ProjectTree({
     onSelectAllTerminalScope,
     openSearch,
     projectById,
+    worktreeById,
     searchActive,
     searchOpen,
     searchQuery,
@@ -447,7 +512,7 @@ export function ProjectTree({
     visibleNodes,
   ]);
   const filteredRootIds = useMemo(
-    () => filteredTree.map((node) => (node.type === "group" ? node.group.id : node.project.id)),
+    () => filteredTree.map((node) => (node.type === "group" ? node.group.id : node.type === "project" ? node.project.id : `wt:${node.worktree.id}`)),
     [filteredTree]
   );
 
@@ -485,9 +550,9 @@ export function ProjectTree({
                   sizeClass={buttonSize}
                   onExpandSidebar={onExpandSidebar}
                 />
-              ) : (
+              ) : node.type === "project" ? (
                 <CollapsedProjectButton key={`p:${node.project.id}`} node={node} sizeClass={buttonSize} />
-              )
+              ) : null
             )}
           </div>
         )}
@@ -615,7 +680,7 @@ export function ProjectTree({
             )}
             {filteredTree.map((node) => (
               <TreeNodeItem
-                key={node.type === "group" ? `g:${node.group.id}` : `p:${node.project.id}`}
+                key={nodeKey(node)}
                 node={node}
                 depth={0}
                 density={density}
@@ -800,6 +865,25 @@ function renderFlyoutNodes(nodes: TNode[], depth: number, actions: TreeActions, 
         </div>
       );
     }
+    if (child.type === "worktree") {
+      return (
+        <button
+          key={`wt:${child.worktree.id}`}
+          className="ui-collapsed-flyout-item flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[12px] text-on-surface"
+          style={{ paddingLeft: padLeft }}
+          title={child.worktree.path}
+          onClick={() => {
+            actions.onOpenWorktree(child.project, child.worktree);
+            onPick();
+          }}
+          onContextMenu={(e) => actions.onContextMenuWorktree(e, child.project, child.worktree)}
+        >
+          <span className="ui-tree-leading-icon flex shrink-0 items-center"><GitBranch size={13} strokeWidth={1.5} /></span>
+          <span className="flex-1 truncate">{child.worktree.name}</span>
+        </button>
+      );
+    }
+
     const p = child.project;
     const status = actions.getProjectStatus(p.id);
     const terminalCount = actions.getProjectTerminalCount(p.id);
@@ -842,7 +926,9 @@ function findNodeById(nodes: TNode[], id: string): TNode | null {
       if (n.group.id === id) return n;
       const found = findNodeById(n.children, id);
       if (found) return found;
-    } else if (n.project.id === id) {
+    } else if (n.type === "project" && n.project.id === id) {
+      return n;
+    } else if (n.type === "worktree" && `wt:${n.worktree.id}` === id) {
       return n;
     }
   }
@@ -852,8 +938,8 @@ function findNodeById(nodes: TNode[], id: string): TNode | null {
 function DragGhost({ activeId, tree }: { activeId: string; tree: TNode[] }) {
   const node = findNodeById(tree, activeId);
   if (!node) return null;
-  const label = node.type === "group" ? node.group.name : node.project.name;
-  const icon = node.type === "group" ? <Folder size={14} strokeWidth={1.5} /> : <Terminal size={14} strokeWidth={1.5} />;
+  const label = node.type === "group" ? node.group.name : node.type === "worktree" ? node.worktree.name : node.project.name;
+  const icon = node.type === "group" ? <Folder size={14} strokeWidth={1.5} /> : node.type === "worktree" ? <GitBranch size={14} strokeWidth={1.5} /> : <Terminal size={14} strokeWidth={1.5} />;
   return (
     <div className="ui-tree-drag-ghost flex items-center gap-2 rounded-xl border border-border bg-surface-container-high px-3 py-1.5 text-[12px] font-medium shadow-lg">
       <span className="text-on-surface-variant">{icon}</span>

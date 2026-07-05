@@ -6,6 +6,7 @@ import type { TreeNode as TNode } from "../../lib/types";
 import { useTreeActions } from "./TreeContext";
 import { Folder, Terminal, Play, ChevronRight, AlertTriangle } from "../icons";
 import { VendorIcon, inferVendor } from "../VendorIcon";
+import { WorktreeIcon } from "../WorktreeIcon";
 import { useI18n } from "../../lib/i18n";
 
 function InlineRename({ initial, onConfirm, onCancel }: { initial: string; onConfirm: (name: string) => void; onCancel: () => void }) {
@@ -60,13 +61,69 @@ function TreeNodeItemImpl({
 }: TreeNodeItemProps) {
   const { t } = useI18n();
   const actions = useTreeActions();
-  const itemId = node.type === "project" ? node.project.id : node.group.id;
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: itemId, disabled: !sortableEnabled });
+  const itemId = node.type === "group" ? node.group.id : node.type === "project" ? node.project.id : `wt:${node.worktree.id}`;
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: itemId, disabled: !sortableEnabled || node.type === "worktree" });
   const sortableStyle = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
   const compact = density === "compact";
   const indentBase = compact ? 6 : 8;
   const indentStep = compact ? 14 : 16;
   const paddingLeft = indentBase + depth * indentStep;
+
+  if (node.type === "worktree") {
+    const { project, worktree } = node;
+    const treeKey = `wt:${worktree.id}`;
+    const isSelected = actions.selectedId === worktree.id;
+
+    return (
+      <div
+        ref={setNodeRef}
+        style={{ ...sortableStyle }}
+        {...attributes}
+        role="treeitem"
+        data-tree-key={treeKey}
+        aria-level={depth + 1}
+        aria-selected={isSelected}
+        tabIndex={focusedNodeKey === treeKey ? 0 : -1}
+        onFocus={() => onFocusNode(treeKey)}
+      >
+        <div
+          className={`ui-tree-node ui-tree-project ui-focus-ring flex items-center rounded-xl cursor-pointer group/item ${
+            compact ? "gap-1.5 py-1 text-[12px]" : "gap-2 py-1.5 text-[13px]"
+          }`}
+          data-selected={isSelected ? "true" : "false"}
+          data-status="idle"
+          data-invalid={worktree.status === "missing" ? "true" : "false"}
+          style={{ paddingLeft, paddingRight: compact ? 8 : 10 }}
+          onClick={() => actions.onSelectWorktree(worktree)}
+          onDoubleClick={() => actions.onOpenWorktree(project, worktree)}
+          onContextMenu={(e) => actions.onContextMenuWorktree(e, project, worktree)}
+        >
+          <span className="ui-tree-leading-icon ui-worktree-tree-icon" title={worktree.branch}>
+            <WorktreeIcon className="h-4 w-4" />
+          </span>
+          <span className="flex min-w-0 flex-1 items-center gap-1.5" title={`${worktree.branch}\n${worktree.path}`}>
+            <span className="block truncate font-medium">{worktree.name}</span>
+            <span
+              className="ui-worktree-short-chip inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 text-[10px] leading-none"
+              title={worktree.branch}
+              aria-label={worktree.branch}
+            >
+              WT
+            </span>
+          </span>
+          {worktree.status === "missing" && (
+            <span
+              className="ui-tree-warning-chip inline-flex shrink-0 items-center justify-center rounded-full"
+              title={t("worktree.status.missing")}
+              aria-label={t("worktree.status.missing")}
+            >
+              <AlertTriangle size={12} strokeWidth={1.5} />
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (node.type === "project") {
     const p = node.project;
@@ -82,6 +139,7 @@ function TreeNodeItemImpl({
       ? inferVendor(providerBadge.vendorHint) ?? inferVendor(providerBadge.providerName)
       : null;
     const cliVendor = p.cli_tool ? inferVendor(p.cli_tool) : null;
+    const projectWorktrees = node.worktrees ?? [];
 
     return (
       <div
@@ -155,6 +213,22 @@ function TreeNodeItemImpl({
             </button>
           </span>
         </div>
+        {projectWorktrees.length > 0 && (
+          <div className={`ui-worktree-children ${compact ? "space-y-0.5" : "space-y-0.5"}`} role="group">
+            {projectWorktrees.map((worktree) => (
+              <TreeNodeItem
+                key={`wt:${worktree.id}`}
+                node={{ type: "worktree", project: p, worktree }}
+                depth={depth + 1}
+                density={density}
+                focusedNodeKey={focusedNodeKey}
+                onFocusNode={onFocusNode}
+                forceExpanded={forceExpanded}
+                sortableEnabled={false}
+              />
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -238,11 +312,11 @@ function TreeNodeItemImpl({
         {isOpen && node.children.length > 0 && (
           <div className="tree-collapse" data-open="true">
             <div className="tree-collapse-inner" role="group">
-              <SortableContext items={node.children.map((c) => c.type === "group" ? c.group.id : c.project.id)} strategy={verticalListSortingStrategy}>
+              <SortableContext items={node.children.map((c) => c.type === "group" ? c.group.id : c.type === "project" ? c.project.id : `wt:${c.worktree.id}`)} strategy={verticalListSortingStrategy}>
                 <div className={`${compact ? "ml-2 space-y-0.5 pb-0.5" : "ml-2.5 space-y-0.5 pb-1"}`}>
                   {node.children.map((child) => (
                     <TreeNodeItem
-                      key={child.type === "group" ? `g:${child.group.id}` : `p:${child.project.id}`}
+                      key={child.type === "group" ? `g:${child.group.id}` : child.type === "project" ? `p:${child.project.id}` : `wt:${child.worktree.id}`}
                       node={child}
                       depth={depth + 1}
                       density={density}

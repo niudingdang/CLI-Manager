@@ -225,24 +225,32 @@ fn migrations() -> Vec<Migration> {
         },
         Migration {
             version: 13,
-            description: "create_session_favorite_snapshots_table",
+            description: "add_cli_args_to_projects",
+            sql: "ALTER TABLE projects ADD COLUMN cli_args TEXT NOT NULL DEFAULT '';",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 14,
+            description: "add_worktree_isolation_tables",
             sql: "
-                CREATE TABLE IF NOT EXISTS session_favorite_snapshots (
-                    session_key   TEXT PRIMARY KEY,
-                    session_id    TEXT NOT NULL,
-                    source        TEXT NOT NULL,
-                    project_key   TEXT NOT NULL,
-                    file_path     TEXT NOT NULL,
-                    title         TEXT NOT NULL,
-                    created_at    INTEGER NOT NULL,
-                    updated_at    INTEGER NOT NULL,
-                    message_count INTEGER NOT NULL,
-                    branch        TEXT,
-                    detail_json   TEXT NOT NULL,
-                    snapshot_at   TEXT NOT NULL
+                ALTER TABLE projects ADD COLUMN worktree_strategy TEXT NOT NULL DEFAULT 'prompt';
+                ALTER TABLE projects ADD COLUMN worktree_root TEXT NOT NULL DEFAULT '';
+
+                CREATE TABLE IF NOT EXISTS worktrees (
+                    id                    TEXT PRIMARY KEY,
+                    project_id            TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    name                  TEXT NOT NULL,
+                    branch                TEXT NOT NULL,
+                    path                  TEXT NOT NULL,
+                    base_branch           TEXT NOT NULL DEFAULT '',
+                    deps_prompt_dismissed INTEGER NOT NULL DEFAULT 0,
+                    status                TEXT NOT NULL DEFAULT 'active',
+                    created_at            TEXT NOT NULL,
+                    updated_at            TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_session_favorite_snapshots_source ON session_favorite_snapshots(source);
-                CREATE INDEX IF NOT EXISTS idx_session_favorite_snapshots_updated ON session_favorite_snapshots(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_worktrees_project ON worktrees(project_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_project_name ON worktrees(project_id, name);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_path ON worktrees(path);
             ",
             kind: MigrationKind::Up,
         },
@@ -462,6 +470,11 @@ pub fn run() {
             commands::git::git_rebase_continue,
             commands::git::git_watch_start,
             commands::git::git_watch_stop,
+            commands::git_worktree::git_worktree_validate,
+            commands::git_worktree::git_worktree_create,
+            commands::git_worktree::git_worktree_check_deps,
+            commands::git_worktree::git_worktree_merge,
+            commands::git_worktree::git_worktree_remove,
             commands::subagent_transcript::subagent_transcript_subscribe,
             commands::subagent_transcript::subagent_transcript_unsubscribe,
             commands::subagent_transcript::subagent_transcript_discover,
