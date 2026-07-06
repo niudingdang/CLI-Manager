@@ -1,5 +1,12 @@
 # Changelog
 
+## [TEMP] - 2026-07-06
+
+### 安全加固
+
+- 收紧项目文件写入/复制、transcript 显式路径、WSL 历史扫描、Markdown 外链、历史图片渲染、WebDAV 密码存储、背景图导入、同步导入、Tauri capability 与 CSP 边界。
+- 改进非 Windows PTY 关闭时的进程组清理，并避免外部终端日志打印完整启动命令。
+
 
 ## [V1.2.5] - 2026-07-04
 

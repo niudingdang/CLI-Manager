@@ -28,6 +28,7 @@ const EVENT_NAME: &str = "subagent-transcript-append";
 const POLL_MS: u64 = 250;
 const OOM_TRANSCRIPT_APPEND_WARN_BYTES: usize = 1024 * 1024;
 const OOM_TRANSCRIPT_OFFSET_WARN_BYTES: u64 = 10 * 1024 * 1024;
+const TRANSCRIPT_READ_MAX_BYTES: u64 = 1024 * 1024;
 
 fn log_transcript_oom_diagnostic(
     phase: &str,
@@ -184,6 +185,9 @@ fn tail_loop(
             let reset = shrank || !started;
             started = true;
             offset = new_offset;
+            if content.is_empty() {
+                continue;
+            }
             info!(
                 "[subagent_transcript] tail read lines: key={key} bytes={} offset={} reset={reset}",
                 content.len(),
@@ -212,7 +216,7 @@ fn tail_loop(
 /// 返回 `(完整行内容, 新 offset, 是否因文件变短而重置)`；无新完整行时返回 None。
 fn read_new_lines(path: &Path, offset: u64) -> Option<(String, u64, bool)> {
     let len = fs::metadata(path).ok()?.len();
-    let (start, shrank) = if len < offset {
+    let (mut start, shrank) = if len < offset {
         (0u64, true)
     } else {
         (offset, false)
@@ -220,16 +224,35 @@ fn read_new_lines(path: &Path, offset: u64) -> Option<(String, u64, bool)> {
     if len <= start {
         return None;
     }
+    let tailing_initial = start == 0 && len > TRANSCRIPT_READ_MAX_BYTES;
+    if tailing_initial {
+        start = len.saturating_sub(TRANSCRIPT_READ_MAX_BYTES);
+    }
 
     let mut file = File::open(path).ok()?;
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
+    let read_len = (len - start).min(TRANSCRIPT_READ_MAX_BYTES);
+    file.take(read_len).read_to_end(&mut buf).ok()?;
 
     // 只发送到最后一个换行；残行留到下次（换行是 ASCII，切点同时是 UTF-8 边界）。
-    let last_nl = buf.iter().rposition(|&b| b == b'\n')?;
-    let complete = &buf[..=last_nl];
-    let consumed = start + complete.len() as u64;
+    let last_nl = match buf.iter().rposition(|&b| b == b'\n') {
+        Some(index) => index,
+        None if read_len == TRANSCRIPT_READ_MAX_BYTES => {
+            return Some((String::new(), start + read_len, shrank));
+        }
+        None => return None,
+    };
+    let first = if tailing_initial {
+        match buf[..=last_nl].iter().position(|&b| b == b'\n') {
+            Some(index) if index < last_nl => index + 1,
+            _ => return Some((String::new(), start + last_nl as u64 + 1, shrank)),
+        }
+    } else {
+        0
+    };
+    let complete = &buf[first..=last_nl];
+    let consumed = start + last_nl as u64 + 1;
     Some((
         String::from_utf8_lossy(complete).to_string(),
         consumed,
@@ -283,6 +306,86 @@ fn normalize_explicit_transcript_path(path: String, wsl_distro_name: Option<&str
         );
     }
     path
+}
+
+fn normalize_wsl_scope_unc(path: &str) -> String {
+    let normalized = path.trim().replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    const VERBATIM_WSL_LOCALHOST_PREFIX: &str = "\\\\?\\UNC\\wsl.localhost\\";
+    const VERBATIM_WSL_DOLLAR_PREFIX: &str = "\\\\?\\UNC\\wsl$\\";
+    const VERBATIM_UNC_PREFIX_LEN: usize = "\\\\?\\UNC\\".len();
+
+    if lower.starts_with(&VERBATIM_WSL_LOCALHOST_PREFIX.to_ascii_lowercase())
+        || lower.starts_with(&VERBATIM_WSL_DOLLAR_PREFIX.to_ascii_lowercase())
+    {
+        return format!("\\\\{}", &normalized[VERBATIM_UNC_PREFIX_LEN..]);
+    }
+
+    normalized
+}
+
+fn has_current_or_parent_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    })
+}
+
+fn components_contain_sequence(components: &[String], sequence: &[&str]) -> bool {
+    components
+        .windows(sequence.len())
+        .any(|window| window.iter().zip(sequence).all(|(a, b)| a == b))
+}
+
+fn is_native_transcript_scope(path: &Path) -> Result<bool, String> {
+    let home = home_dir().ok_or_else(|| "no_home_dir".to_string())?;
+    let allowed_roots = [home.join(".claude"), resolve_codex_sessions_root(None)];
+    Ok(allowed_roots.iter().any(|root| path.starts_with(root)))
+}
+
+fn is_linux_transcript_scope(linux_path: &str) -> bool {
+    let linux_path = linux_path.trim();
+    if !linux_path.starts_with('/') {
+        return false;
+    }
+    let components: Vec<String> = linux_path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    if components
+        .iter()
+        .any(|component| component == "." || component == "..")
+    {
+        return false;
+    }
+    components_contain_sequence(&components, &[".claude", "projects"])
+        || components_contain_sequence(&components, &[".codex", "sessions"])
+}
+
+fn validate_explicit_transcript_path(path: &str) -> Result<(), String> {
+    let normalized_wsl = normalize_wsl_scope_unc(path);
+    if let Some((_distro, linux_path)) = crate::wsl::parse_wsl_unc_path(&normalized_wsl) {
+        if is_linux_transcript_scope(&linux_path) {
+            return Ok(());
+        }
+        return Err("transcript_path_outside_allowed_roots".to_string());
+    }
+
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("transcript_path_not_absolute".to_string());
+    }
+    if has_current_or_parent_component(&path) {
+        return Err("transcript_path_contains_parent_segment".to_string());
+    }
+    if is_native_transcript_scope(&path)? {
+        Ok(())
+    } else {
+        Err("transcript_path_outside_allowed_roots".to_string())
+    }
 }
 
 fn cwd_for_wsl_slug(cwd: &str) -> String {
@@ -640,19 +743,25 @@ fn resolve_transcript_path(
                 info!(
                     "[subagent_transcript] resolving explicit linux transcript path with distro={distro}"
                 );
-                return Ok(normalize_explicit_transcript_path(explicit, Some(&distro)));
+                let resolved = normalize_explicit_transcript_path(explicit, Some(&distro));
+                validate_explicit_transcript_path(&resolved)?;
+                return Ok(resolved);
             }
-            return Ok(normalize_explicit_transcript_path(explicit, None));
+            let resolved = normalize_explicit_transcript_path(explicit, None);
+            validate_explicit_transcript_path(&resolved)?;
+            return Ok(resolved);
         }
         info!(
             "[subagent_transcript] resolving explicit transcript path: hasWslDistro={} isLinuxPath={}",
             wsl_distro_name.as_deref().is_some_and(|v| !v.trim().is_empty()),
             is_linux_absolute_path(&explicit)
         );
-        return Ok(normalize_explicit_transcript_path(
+        let resolved = normalize_explicit_transcript_path(
             explicit,
             wsl_distro_name.as_deref(),
-        ));
+        );
+        validate_explicit_transcript_path(&resolved)?;
+        return Ok(resolved);
     }
 
     let cwd = trimmed(cwd).ok_or_else(|| "missing_cwd".to_string())?;
@@ -915,15 +1024,39 @@ mod tests {
 
     #[test]
     fn resolve_prefers_explicit_transcript_path() {
+        let explicit = home_dir()
+            .unwrap()
+            .join(".claude")
+            .join("projects")
+            .join("p")
+            .join("s")
+            .join("subagents")
+            .join("agent-a.jsonl");
         let got = resolve_transcript_path(
-            Some(r"  C:\tmp\a.jsonl ".to_string()),
+            Some(format!("  {} ", explicit.to_string_lossy())),
             None,
             None,
             None,
             None,
         )
         .unwrap();
-        assert_eq!(got, r"C:\tmp\a.jsonl");
+        assert_eq!(got, explicit.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_rejects_explicit_transcript_path_outside_allowed_roots() {
+        let err = resolve_transcript_path(
+            Some(r"C:\tmp\a.jsonl".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err == "transcript_path_not_absolute" || err == "transcript_path_outside_allowed_roots",
+            "got {err}"
+        );
     }
 
     #[test]
@@ -943,19 +1076,24 @@ mod tests {
     }
 
     #[test]
-    fn explicit_native_posix_path_stays_native_without_wsl_distro() {
+    fn explicit_native_path_stays_native_without_wsl_distro() {
+        let explicit = home_dir()
+            .unwrap()
+            .join(".claude")
+            .join("projects")
+            .join("p")
+            .join("s")
+            .join("subagents")
+            .join("agent-a.jsonl");
         let got = resolve_transcript_path(
-            Some(" /Users/me/.claude/projects/p/s/subagents/agent-a.jsonl ".to_string()),
+            Some(format!(" {} ", explicit.to_string_lossy())),
             None,
             None,
             None,
             None,
         )
         .unwrap();
-        assert_eq!(
-            got,
-            "/Users/me/.claude/projects/p/s/subagents/agent-a.jsonl"
-        );
+        assert_eq!(got, explicit.to_string_lossy());
     }
 
     #[test]

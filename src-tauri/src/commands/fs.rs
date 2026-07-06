@@ -375,6 +375,7 @@ pub async fn file_write_text(
         if let Some(parent) = path.parent() {
             ensure_existing_child_within_root(&root, parent)?;
         }
+        ensure_target_safe_for_write(&root, &path)?;
         fs::write(&path, content).map_err(|err| format!("write_file_failed: {err}"))
     })
     .await
@@ -465,7 +466,7 @@ pub async fn file_copy(
             return Err("target_inside_source".into());
         }
         prepare_target(&target, overwrite)?;
-        copy_path(&source, &target)
+        copy_path(&root, &source, &target)
     })
     .await
     .map_err(|err| err.to_string())?
@@ -598,26 +599,77 @@ fn relative_from_root(root: &Path, path: &Path) -> Result<String, String> {
 }
 
 fn prepare_target(target: &Path, overwrite: bool) -> Result<(), String> {
-    if !target.exists() {
-        return Ok(());
+    match fs::symlink_metadata(target) {
+        Ok(metadata) => {
+            if !overwrite {
+                return Err("target_exists".into());
+            }
+            remove_path_with_metadata(target, metadata)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("metadata_failed: {err}")),
     }
-    if !overwrite {
-        return Err("target_exists".into());
-    }
-    remove_path(target)
 }
 
-fn remove_path(path: &Path) -> Result<(), String> {
-    if path.is_dir() {
+fn is_symlink_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+fn ensure_target_safe_for_write(root: &Path, target: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("metadata_failed: {err}")),
+    };
+    if is_symlink_or_reparse(&metadata) {
+        return Err("path_is_symlink".into());
+    }
+    ensure_existing_child_within_root(root, target)
+}
+
+fn remove_path_with_metadata(path: &Path, metadata: fs::Metadata) -> Result<(), String> {
+    if metadata.is_dir() && !is_symlink_or_reparse(&metadata) {
         fs::remove_dir_all(path).map_err(|err| format!("remove_dir_failed: {err}"))
     } else {
         fs::remove_file(path).map_err(|err| format!("remove_file_failed: {err}"))
     }
 }
 
-fn copy_path(source: &Path, target: &Path) -> Result<(), String> {
-    if source.is_dir() {
-        copy_dir_recursive(source, target)
+fn remove_path(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|err| format!("metadata_failed: {err}"))?;
+    remove_path_with_metadata(path, metadata)
+}
+
+fn ensure_copy_source_safe(root: &Path, source: &Path) -> Result<fs::Metadata, String> {
+    let metadata = fs::symlink_metadata(source).map_err(|err| format!("metadata_failed: {err}"))?;
+    if is_symlink_or_reparse(&metadata) {
+        return Err("path_is_symlink".into());
+    }
+    let canonical = source
+        .canonicalize()
+        .map_err(|err| format!("path_canonicalize_failed: {err}"))?;
+    if !canonical.starts_with(root) {
+        return Err("path_escapes_root".into());
+    }
+    Ok(metadata)
+}
+
+fn copy_path(root: &Path, source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = ensure_copy_source_safe(root, source)?;
+    if metadata.is_dir() {
+        copy_dir_recursive(root, source, target)
     } else {
         fs::copy(source, target)
             .map(|_| ())
@@ -625,13 +677,13 @@ fn copy_path(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+fn copy_dir_recursive(root: &Path, source: &Path, target: &Path) -> Result<(), String> {
     fs::create_dir(target).map_err(|err| format!("copy_dir_create_failed: {err}"))?;
     for item in fs::read_dir(source).map_err(|err| format!("copy_dir_read_failed: {err}"))? {
         let entry = item.map_err(|err| format!("copy_dir_entry_failed: {err}"))?;
         let child_source = entry.path();
         let child_target = target.join(entry.file_name());
-        copy_path(&child_source, &child_target)?;
+        copy_path(root, &child_source, &child_target)?;
     }
     Ok(())
 }
@@ -956,13 +1008,59 @@ mod tests {
 
         let source = resolve_existing_path(&root, "a/one.txt").unwrap();
         let target = resolve_named_target(&root, "", "two.txt").unwrap();
-        copy_path(&source, &target).unwrap();
+        copy_path(&root, &source, &target).unwrap();
         assert_eq!(fs::read_to_string(root.join("two.txt")).unwrap(), "one");
 
         let moved = resolve_named_target(&root, "", "three.txt").unwrap();
         move_path(&root, &target, &moved, false).unwrap();
         assert!(!root.join("two.txt").exists());
         assert_eq!(fs::read_to_string(root.join("three.txt")).unwrap(), "one");
+    }
+
+    #[test]
+    fn file_write_rejects_symlink_targets() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("real.txt"), "real").unwrap();
+        let root = root.canonicalize().unwrap();
+        let link = root.join("link.txt");
+
+        #[cfg(unix)]
+        if std::os::unix::fs::symlink(root.join("real.txt"), &link).is_err() {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        if std::os::windows::fs::symlink_file(root.join("real.txt"), &link).is_err() {
+            return;
+        }
+
+        assert_eq!(
+            ensure_target_safe_for_write(&root, &link).unwrap_err(),
+            "path_is_symlink"
+        );
+    }
+
+    #[test]
+    fn copy_rejects_nested_symlink_sources() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("real.txt"), "real").unwrap();
+        let root = root.canonicalize().unwrap();
+        let link = root.join("src").join("link.txt");
+
+        #[cfg(unix)]
+        if std::os::unix::fs::symlink(root.join("real.txt"), &link).is_err() {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        if std::os::windows::fs::symlink_file(root.join("real.txt"), &link).is_err() {
+            return;
+        }
+
+        let err = copy_path(&root, &root.join("src"), &root.join("dst")).unwrap_err();
+        assert_eq!(err, "path_is_symlink");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 ﻿import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, type MouseEvent as ReactMouseEvent } from "react";
 import { useShallow } from "zustand/shallow";
 import type { DragEndEvent } from "@dnd-kit/core";
+import { invoke } from "@tauri-apps/api/core";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTerminalStore, type SessionStatus, type SplitTerminalOptions } from "../../stores/terminalStore";
 import { isProjectFileDirty, useFileExplorerStore } from "../../stores/fileExplorerStore";
@@ -42,7 +43,6 @@ import {
   TerminalSquare,
   Trash2,
 } from "../icons";
-import { openPath } from "@tauri-apps/plugin-opener";
 import type { SettingsTab } from "../SettingsModal";
 import { useI18n } from "../../lib/i18n";
 import { getOsPlatform } from "../../lib/shell";
@@ -788,7 +788,7 @@ export function Sidebar({
 
   const handleOpenProjectDirectory = useCallback(async (project: Project) => {
     try {
-      await openPath(project.path);
+      await invoke("open_folder_in_explorer", { path: project.path });
     } catch (err) {
       logError("Failed to open project directory", err);
       toast.error(t("sidebar.toast.openDirectoryFailed"), { description: String(err) });

@@ -102,6 +102,22 @@ for path in session_files {
 }
 ```
 
+### Host-independent Linux path validation
+
+When Rust code validates an explicit Linux path while running on Windows, do not use `Path::is_absolute()` or `Path::components()` as the authority. On Windows, `/home/me/.claude/...` is not a native absolute path, so host-native path APIs can reject a valid Linux transcript path after it is converted to WSL UNC.
+
+```rust
+// Good: validate Linux scope by slash-separated Linux components.
+let components: Vec<&str> = linux_path
+    .trim()
+    .split('/')
+    .filter(|part| !part.is_empty())
+    .collect();
+let safe = linux_path.trim().starts_with('/')
+    && !components.iter().any(|part| *part == "." || *part == "..")
+    && components.windows(2).any(|w| w == [".claude", "projects"]);
+```
+
 ### WSL 命令环境变量
 
 ```rust
@@ -212,6 +228,7 @@ wsl.exe -d Ubuntu --exec sh -lc "curl -fsSL https://bun.sh/install | bash"
 - `open_git_repo` 在 WSL UNC 路径下成功打开仓库（需要 WSL 环境）
 - `session_matches_project_path` 同时匹配 Windows 盘符 + WSL /mnt + WSL UNC→Linux 三种 project_key
 - `path_within_history_scope` 接受 `\\wsl$` / `\\wsl.localhost` / `\\?\UNC\wsl*` 三种等价前缀，且仍拒绝历史根目录外部路径
+- Linux transcript scope validation must be host-independent: on Windows hosts, `/home/.../.claude/projects/...` and `/home/.../.codex/sessions/...` are still accepted after WSL conversion, while `.` / `..` components are rejected.
 - `ccusage_get_status` 在 WSL 已装 Bun、但未加载 shell PATH 时仍能检测到 `bun` / `bunx`
 - `ccusage_install_tools(target="wsl")` 返回手动安装错误，不得启动任何安装命令
 - 前端设置页的 WSL 状态按钮在 `ready / manual / unavailable / multi-distro` 四种状态下文案一致

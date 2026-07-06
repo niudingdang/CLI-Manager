@@ -6,6 +6,7 @@ use std::fs::{self, File};
 use std::path::Path;
 
 const DEFAULT_REMOTE_DIR: &str = "cli-manager";
+const LOCAL_SYNC_JSON_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncData {
@@ -268,6 +269,9 @@ pub fn local_import(zip_path: &str) -> Result<SyncData, String> {
         error!("zip 中找不到 sync.json: {}", e);
         format!("无效的同步文件: {}", e)
     })?;
+    if entry.size() > LOCAL_SYNC_JSON_MAX_BYTES {
+        return Err("同步文件过大".to_string());
+    }
 
     let data: SyncData =
         serde_json::from_reader(&mut entry).map_err(|e| format!("解析数据失败: {}", e))?;

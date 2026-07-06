@@ -182,7 +182,7 @@ fn open_platform_terminal(tabs: &[ExternalTab]) -> Result<(), String> {
         })?;
     }
 
-    info!("open_windows_terminal: wt {}", args.join(" "));
+    info!("open_windows_terminal: tabs={}", tabs.len());
 
     spawn_windows_terminal(&args).map_err(|e| {
         error!("Failed to open Windows Terminal: {}", e);

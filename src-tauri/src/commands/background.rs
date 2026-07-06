@@ -6,6 +6,7 @@ use tauri::{AppHandle, Manager};
 
 /// 5 MiB — 超过此大小返回 warning，但不阻断保存。
 const SIZE_WARN_THRESHOLD: u64 = 5 * 1024 * 1024;
+const SIZE_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 允许的扩展名（小写）。**不支持 webp**。
 const ALLOWED_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif"];
@@ -118,6 +119,15 @@ pub async fn save_background_image(
         .to_string();
     let ext = validate_extension(&file_name).map_err(|e| e.to_string())?;
 
+    let src_metadata =
+        std::fs::metadata(&src).map_err(|e| format!("source_metadata_failed: {e}"))?;
+    if !src_metadata.is_file() {
+        return Err("source_not_file".into());
+    }
+    if src_metadata.len() > SIZE_MAX_BYTES {
+        return Err("file_too_large".into());
+    }
+
     // 3. 读取源文件字节（阻塞 IO 放到 spawn_blocking）
     let src_for_read = src.clone();
     let bytes = tokio::task::spawn_blocking(move || std::fs::read(&src_for_read))
@@ -126,6 +136,9 @@ pub async fn save_background_image(
         .map_err(|e| format!("read_source_failed: {e}"))?;
 
     let size_bytes = bytes.len() as u64;
+    if size_bytes > SIZE_MAX_BYTES {
+        return Err("file_too_large".into());
+    }
     let warning = check_size_warning(size_bytes).map(String::from);
 
     // 4. 计算 hash 文件名

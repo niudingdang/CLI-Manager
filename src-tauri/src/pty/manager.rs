@@ -453,6 +453,30 @@ PS0='\e]133;C\a${PS0:0:$((__cli_manager_ran=1,0))}'
         ))
     }
 
+    #[cfg(not(target_os = "windows"))]
+    fn kill_process_group(pid: u32) -> Result<(), String> {
+        if pid == 0 {
+            return Err("invalid_pid".to_string());
+        }
+        let pgid = format!("-{pid}");
+        let output = std::process::Command::new("kill")
+            .args(["-TERM", pgid.as_str()])
+            .output()
+            .map_err(|e| format!("kill start failed for process group {pgid}: {e}"))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        Err(format!(
+            "kill failed for process group {pgid}: status={}, detail={}",
+            output.status, detail
+        ))
+    }
+
     fn build_shell_args(
         shell: &str,
         env_vars: Option<&HashMap<String, String>>,
@@ -868,6 +892,17 @@ PS0='\e]133;C\a${PS0:0:$((__cli_manager_ran=1,0))}'
                     if let Err(err) = Self::kill_process_tree(pid) {
                         warn!(
                             "pty process tree kill failed, fallback to child kill: id={}, pid={}, reason={}, error={}",
+                            session_id, pid, reason, err
+                        );
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Some(pid) = child.process_id() {
+                    if let Err(err) = Self::kill_process_group(pid) {
+                        warn!(
+                            "pty process group kill failed, fallback to child kill: id={}, pid={}, reason={}, error={}",
                             session_id, pid, reason, err
                         );
                     }

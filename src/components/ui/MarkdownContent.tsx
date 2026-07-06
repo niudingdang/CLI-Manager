@@ -117,7 +117,17 @@ function extractPlainText(children: ReactNode): string {
   return "";
 }
 
+function isAllowedMarkdownUrl(href: string): boolean {
+  try {
+    const protocol = new URL(href).protocol.toLowerCase();
+    return protocol === "http:" || protocol === "https:" || protocol === "mailto:";
+  } catch {
+    return false;
+  }
+}
+
 function openMarkdownUrl(href: string) {
+  if (!isAllowedMarkdownUrl(href)) return;
   void openUrl(href).catch((err) => logError("打开 Markdown 链接失败", { href, err }));
 }
 

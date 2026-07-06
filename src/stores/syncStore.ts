@@ -108,6 +108,7 @@ interface SyncStore {
 }
 
 let store: Store | null = null;
+let sessionWebdavPassword = "";
 async function getStore() {
   if (!store) {
     const paths = await getCliManagerDataPaths();
@@ -206,7 +207,10 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     const s = await getStore();
     const url = (await s.get<string>("webdavUrl")) ?? "";
     const username = (await s.get<string>("webdavUsername")) ?? "";
-    const hasPassword = (await s.get<boolean>("hasPassword")) ?? false;
+    await s.delete("webdavPassword").catch(() => false);
+    await s.set("hasPassword", false);
+    sessionWebdavPassword = "";
+    const hasPassword = false;
     const syncMode = ((await s.get<string>("syncMode")) as SyncMode | undefined) ?? "cloud";
     const localSyncDir = (await s.get<string>("localSyncDir")) ?? "";
     const remoteDir = (await s.get<string>("remoteDir")) ?? "";
@@ -258,9 +262,11 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     await s.set("webdavUrl", url);
     await s.set("webdavUsername", username);
     if (password !== undefined) {
-      await s.set("hasPassword", true);
-      await s.set("webdavPassword", password);
-      set({ webdavUrl: url, webdavUsername: username, hasPassword: true });
+      sessionWebdavPassword = password;
+      const hasPassword = password.length > 0;
+      await s.delete("webdavPassword").catch(() => false);
+      await s.set("hasPassword", hasPassword);
+      set({ webdavUrl: url, webdavUsername: username, hasPassword });
     } else {
       // Preserve existing hasPassword state when not providing new password
       set({ webdavUrl: url, webdavUsername: username });
@@ -270,7 +276,8 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   clearPassword: async () => {
     const s = await getStore();
     await s.set("hasPassword", false);
-    await s.set("webdavPassword", "");
+    await s.delete("webdavPassword").catch(() => false);
+    sessionWebdavPassword = "";
     set({ hasPassword: false });
   },
 
@@ -309,8 +316,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
   upload: async () => {
     const { webdavUrl, webdavUsername, deviceId, deviceName, remoteDir } = get();
-    const s = await getStore();
-    const password = (await s.get<string>("webdavPassword")) ?? "";
+    const password = sessionWebdavPassword;
 
     if (!webdavUrl || !password) {
       set({ status: "error" });
@@ -367,8 +373,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
   download: async (force = false, options) => {
     const { webdavUrl, webdavUsername, deviceId, deviceName, remoteDir } = get();
-    const s = await getStore();
-    const password = (await s.get<string>("webdavPassword")) ?? "";
+    const password = sessionWebdavPassword;
 
     if (!webdavUrl || !password) {
       set({ status: "error" });
@@ -445,8 +450,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
   getPreview: async (targetDeviceName) => {
     const { webdavUrl, webdavUsername, deviceId, deviceName, remoteDir } = get();
-    const s = await getStore();
-    const password = (await s.get<string>("webdavPassword")) ?? "";
+    const password = sessionWebdavPassword;
     if (!webdavUrl || !password) {
       throw new Error("请先配置并测试 WebDAV 连接");
     }
@@ -483,8 +487,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
   listDeviceSnapshots: async () => {
     const { webdavUrl, webdavUsername, knownDeviceNames, remoteDir } = get();
-    const s = await getStore();
-    const password = (await s.get<string>("webdavPassword")) ?? "";
+    const password = sessionWebdavPassword;
     if (!webdavUrl || !password) return [];
     return invoke<DeviceSnapshotInfo[]>("sync_list_device_snapshots", {
       config: { url: webdavUrl, username: webdavUsername, password },
