@@ -1188,6 +1188,22 @@ pub async fn history_search(
             let project_key = file_ref.project_key.clone();
             let mut local_full = false;
 
+            if message_content_matches_query(&session_id, &normalized_query) {
+                hits.push(HistorySearchResult {
+                    session_id: session_id.clone(),
+                    source: source_name.clone(),
+                    project_key: project_key.clone(),
+                    title: title.clone(),
+                    file_path: file_path_str.clone(),
+                    role: "sessionId".to_string(),
+                    snippet: session_id.clone(),
+                    timestamp: None,
+                });
+                if hits.len() >= max_hits {
+                    return Ok(hits);
+                }
+            }
+
             let scan_result =
                 iter_session_messages_filtered(&file_ref.path, &normalized_query, |_, msg| {
                     if !message_content_matches_query(&msg.content, &normalized_query) {
