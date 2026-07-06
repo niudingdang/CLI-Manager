@@ -541,10 +541,17 @@ export function Sparkline({
     const y = 92 - ((p - min) / range) * 78;
     return [x, y] as const;
   });
-  const linePath = coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x},${y}`).join(" ");
-  const areaPath = `${linePath} L100,100 L0,100 Z`;
   const [lastX, lastY] = coords[coords.length - 1];
   const pointColors = points.map((_, index) => details?.[index]?.color ?? color);
+  const areaFadeId = `${gradientId}-area-fade`;
+  const areaMaskId = `${gradientId}-area-mask`;
+  const areaSegments = coords.slice(1).map(([x, y], index) => {
+    const [prevX, prevY] = coords[index];
+    return {
+      color: pointColors[index + 1] ?? color,
+      d: `M${prevX},${prevY} L${x},${y} L${x},100 L${prevX},100 Z`,
+    };
+  });
 
   // hover 命中：用容器像素宽换算最近点索引
   const safeIndex =
@@ -574,12 +581,17 @@ export function Sparkline({
     >
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full" style={{ height }}>
         <defs>
-          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.35} />
-            <stop offset="100%" stopColor={color} stopOpacity={0} />
+          <linearGradient id={areaFadeId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="white" stopOpacity={0.35} />
+            <stop offset="100%" stopColor="white" stopOpacity={0} />
           </linearGradient>
+          <mask id={areaMaskId} maskUnits="userSpaceOnUse">
+            <rect x="0" y="0" width="100" height="100" fill={`url(#${areaFadeId})`} />
+          </mask>
         </defs>
-        <path d={areaPath} fill={`url(#${gradientId})`} />
+        {areaSegments.map((segment, index) => (
+          <path key={index} d={segment.d} fill={segment.color} mask={`url(#${areaMaskId})`} />
+        ))}
         {coords.slice(1).map(([x, y], index) => {
           const [prevX, prevY] = coords[index];
           const segmentColor = pointColors[index + 1] ?? color;
