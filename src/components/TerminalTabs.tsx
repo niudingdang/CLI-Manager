@@ -302,7 +302,6 @@ interface SortableTabProps {
   hoverInfo: TerminalTabHoverInfo;
   onActivate: () => void;
   onClose: (anchor?: SplitPickerAnchor) => void;
-  onStartEdit: () => void;
   onSubmitEdit: (title: string) => void;
   onCancelEdit: () => void;
   menuContent: (getAnchor: () => SplitPickerAnchor | undefined) => ReactNode;
@@ -322,7 +321,6 @@ function SortableTab({
   hoverInfo,
   onActivate,
   onClose,
-  onStartEdit,
   onSubmitEdit,
   onCancelEdit,
   menuContent,
@@ -461,9 +459,9 @@ function SortableTab({
           onClick={onActivate}
           onPointerEnter={scheduleHoverCard}
           onPointerLeave={scheduleHideHoverCard}
-          onDoubleClick={() => {
+          onDoubleClick={(event) => {
             hideHoverCard();
-            onStartEdit();
+            onClose(event.currentTarget.getBoundingClientRect());
           }}
           onContextMenu={(event) => {
             hideHoverCard();
@@ -946,7 +944,6 @@ function PaneTabBar({
               hoverInfo={buildTerminalTabHoverInfo(session, session.projectId ? projectById.get(session.projectId) : undefined)}
               onActivate={() => onActivateSession(session.id)}
               onClose={(anchor) => closePaneSessions([session.id], anchor)}
-              onStartEdit={() => onStartEdit(session.id)}
               onSubmitEdit={(title) => onSubmitEdit(session.id, title)}
               onCancelEdit={onCancelEdit}
               menuClassName="terminal-skin"
@@ -954,6 +951,7 @@ function PaneTabBar({
               menuContent={(getAnchor) => (
                 <>
                   <ContextMenuItem onSelect={() => closePaneSessions([session.id], getAnchor())}>{t("terminal.tab.closeCurrent")}</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => onStartEdit(session.id)}>{t("terminal.tab.rename", { title: session.title })}</ContextMenuItem>
                   <ContextMenuItem onSelect={() => closeOtherPaneSessions(session.id, getAnchor())}>{t("terminal.tab.closeOthers")}</ContextMenuItem>
                   <ContextMenuItem onSelect={() => closePaneSessionsToLeft(session.id, getAnchor())}>{t("terminal.tab.closeLeft")}</ContextMenuItem>
                   <ContextMenuItem onSelect={() => closePaneSessionsToRight(session.id, getAnchor())}>{t("terminal.tab.closeRight")}</ContextMenuItem>
