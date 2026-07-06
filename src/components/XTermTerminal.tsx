@@ -28,8 +28,10 @@ import { debugConsoleWarn } from "../lib/debugConsole";
 import { useI18n } from "../lib/i18n";
 import { normalizeTerminalFontFamily } from "../lib/terminalFontFamily";
 import {
+  TERMINAL_INPUT_SUGGESTION_BUILTIN_PROMPT,
   TERMINAL_INPUT_SUGGESTION_AI_MODEL,
-  getTerminalInputSuggestions,
+  getTerminalInputSuggestionResult,
+  mergeTerminalInputSuggestionUsage,
   type TerminalInputSuggestion,
 } from "../lib/terminalInputSuggestions";
 import {
@@ -1678,7 +1680,7 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
         return;
       }
 
-      const suggestions = await getTerminalInputSuggestions({
+      const suggestionResult = await getTerminalInputSuggestionResult({
         input,
         projectId,
         cwd: session?.cwd ?? null,
@@ -1688,7 +1690,25 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
         templates,
         provider: currentSettings.terminalInputSuggestionProvider,
         model: TERMINAL_INPUT_SUGGESTION_AI_MODEL,
+        aiConfig: {
+          enabled: currentSettings.terminalInputSuggestionLlmEnabled,
+          baseUrl: currentSettings.terminalInputSuggestionBaseUrl,
+          apiKey: currentSettings.terminalInputSuggestionApiKey,
+          model: currentSettings.terminalInputSuggestionModel,
+          prompt: currentSettings.terminalInputSuggestionUseBuiltinPrompt
+            ? TERMINAL_INPUT_SUGGESTION_BUILTIN_PROMPT
+            : currentSettings.terminalInputSuggestionCustomPrompt,
+        },
       });
+      if (suggestionResult.aiAttempt) {
+        const settingsStore = useSettingsStore.getState();
+        void settingsStore.update(
+          "terminalInputSuggestionUsage",
+          mergeTerminalInputSuggestionUsage(settingsStore.terminalInputSuggestionUsage, suggestionResult.aiAttempt)
+        );
+      }
+      if (suggestionDisposed || requestId !== suggestionRequestId || input !== inputBuffer.current) return;
+      const suggestions = suggestionResult.suggestions;
       const suggestion = suggestions[0] ?? null;
       suggestionRef.current = suggestion;
       updateSuggestionGhostPosition(suggestion);
@@ -1710,6 +1730,10 @@ export function XTermTerminal({ sessionId, isActive = true, isVisible = true, fo
       if (!settings.terminalInputSuggestionsEnabled || !suggestion?.suffix) return false;
       clearSuggestionGhost();
       forwardTerminalInput(suggestion.suffix, "onData");
+      void settings.update(
+        "terminalInputSuggestionUsage",
+        mergeTerminalInputSuggestionUsage(settings.terminalInputSuggestionUsage, { accepted: true })
+      );
       return true;
     };
 

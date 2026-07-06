@@ -8,6 +8,7 @@ import {
   RefreshCw,
   ServerCog,
   Settings2,
+  Sparkles,
   Terminal,
   Webhook,
   type LucideIcon,
@@ -23,6 +24,7 @@ import { ShortcutSettingsPage } from "./settings/pages/ShortcutSettingsPage";
 import { TemplateSettingsPage } from "./settings/pages/TemplateSettingsPage";
 import { SyncSettingsPage } from "./settings/pages/SyncSettingsPage";
 import { HookSettingsPage } from "./settings/pages/HookSettingsPage";
+import { CommandSuggestionSettingsPage } from "./settings/pages/CommandSuggestionSettingsPage";
 import { ProviderSettingsPage } from "./settings/pages/ProviderSettingsPage";
 import { ModelPricingSettingsPage } from "./settings/pages/ModelPricingSettingsPage";
 import { AboutSettingsPage } from "./settings/pages/AboutSettingsPage";
@@ -40,6 +42,7 @@ export type SettingsTab =
   | "model-pricing"
   | "sync"
   | "hooks"
+  | "command-suggestions"
   | "about";
 
 interface SettingsTabConfig {
@@ -59,6 +62,7 @@ const SETTINGS_TAB_ORDER: SettingsTab[] = [
   "model-pricing",
   "sync",
   "hooks",
+  "command-suggestions",
   "sidebar",
   "about",
 ];
@@ -121,6 +125,12 @@ const SETTINGS_TAB_CONFIG: Record<SettingsTab, SettingsTabConfig> = {
     title: "settings.tabs.hooks.title",
     description: "settings.tabs.hooks.description",
     icon: Webhook,
+  },
+  "command-suggestions": {
+    label: "settings.tabs.commandSuggestions.label",
+    title: "settings.tabs.commandSuggestions.title",
+    description: "settings.tabs.commandSuggestions.description",
+    icon: Sparkles,
   },
   about: {
     label: "settings.tabs.about.label",
@@ -214,6 +224,7 @@ export function SettingsModal({ open, onClose, onAfterClose, initialTab, onActiv
     if (activeTab === "model-pricing") return <ModelPricingSettingsPage searchValue={searchValue} />;
     if (activeTab === "sync") return <SyncSettingsPage />;
     if (activeTab === "hooks") return <HookSettingsPage />;
+    if (activeTab === "command-suggestions") return <CommandSuggestionSettingsPage />;
     if (activeTab === "about") return <AboutSettingsPage />;
     return null;
   })();

@@ -5,7 +5,13 @@ import { resolveAutoTerminalThemeId } from "../lib/terminalThemes";
 import { backgroundImageExists } from "../lib/assetUrl";
 import { defaultShellForOs, getOsPlatform, isWindowsOnlyShellKey } from "../lib/shell";
 import { getCliManagerDataPaths } from "../lib/appPaths";
-import type { TerminalInputSuggestionProvider } from "../lib/terminalInputSuggestions";
+import {
+  DEFAULT_TERMINAL_INPUT_SUGGESTION_USAGE,
+  TERMINAL_INPUT_SUGGESTION_AI_MODEL,
+  type TerminalInputSuggestionModelTestResult,
+  type TerminalInputSuggestionProvider,
+  type TerminalInputSuggestionUsageStats,
+} from "../lib/terminalInputSuggestions";
 
 export type ThemeMode = "dark" | "light" | "system";
 export type LightThemePalette =
@@ -42,6 +48,7 @@ type LastSettingsTab =
   | "model-pricing"
   | "sync"
   | "hooks"
+  | "command-suggestions"
   | "about";
 export type TerminalSidePanelSkin = "terminal" | "classic-terminal" | "warm-paper" | "sunrise" | "linen" | "latte";
 export type TerminalStatsCardKey =
@@ -223,6 +230,14 @@ interface Settings {
   terminalBackground: TerminalBackgroundSettings;
   terminalInputSuggestionsEnabled: boolean;
   terminalInputSuggestionProvider: TerminalInputSuggestionProvider;
+  terminalInputSuggestionLlmEnabled: boolean;
+  terminalInputSuggestionBaseUrl: string;
+  terminalInputSuggestionApiKey: string;
+  terminalInputSuggestionModel: string;
+  terminalInputSuggestionUseBuiltinPrompt: boolean;
+  terminalInputSuggestionCustomPrompt: string;
+  terminalInputSuggestionUsage: TerminalInputSuggestionUsageStats;
+  terminalInputSuggestionLastTest: TerminalInputSuggestionModelTestResult | null;
   hookPopupNotificationsEnabled: boolean;
   hookPopupAutoCloseEnabled: boolean;
   hookPopupAutoCloseSeconds: number;
@@ -332,6 +347,14 @@ const DEFAULTS: Settings = {
   },
   terminalInputSuggestionsEnabled: true,
   terminalInputSuggestionProvider: "local",
+  terminalInputSuggestionLlmEnabled: false,
+  terminalInputSuggestionBaseUrl: "",
+  terminalInputSuggestionApiKey: "",
+  terminalInputSuggestionModel: TERMINAL_INPUT_SUGGESTION_AI_MODEL,
+  terminalInputSuggestionUseBuiltinPrompt: true,
+  terminalInputSuggestionCustomPrompt: "",
+  terminalInputSuggestionUsage: { ...DEFAULT_TERMINAL_INPUT_SUGGESTION_USAGE },
+  terminalInputSuggestionLastTest: null,
   hookPopupNotificationsEnabled: true,
   hookPopupAutoCloseEnabled: true,
   hookPopupAutoCloseSeconds: 60,
@@ -383,6 +406,7 @@ const LAST_SETTINGS_TABS: readonly LastSettingsTab[] = [
   "model-pricing",
   "sync",
   "hooks",
+  "command-suggestions",
   "about",
 ];
 
@@ -583,6 +607,68 @@ function migrateTerminalInputSuggestionProvider(value: unknown): TerminalInputSu
   return value === "local" || value === "ai" ? value : DEFAULTS.terminalInputSuggestionProvider;
 }
 
+function migrateTerminalInputSuggestionUsage(value: unknown): TerminalInputSuggestionUsageStats {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ...DEFAULT_TERMINAL_INPUT_SUGGESTION_USAGE };
+  }
+  const raw = value as Record<string, unknown>;
+  return {
+    requestCount: clampNumber(raw.requestCount, 0, Number.MAX_SAFE_INTEGER, 0),
+    successCount: clampNumber(raw.successCount, 0, Number.MAX_SAFE_INTEGER, 0),
+    failureCount: clampNumber(raw.failureCount, 0, Number.MAX_SAFE_INTEGER, 0),
+    fallbackCount: clampNumber(raw.fallbackCount, 0, Number.MAX_SAFE_INTEGER, 0),
+    acceptedCount: clampNumber(raw.acceptedCount, 0, Number.MAX_SAFE_INTEGER, 0),
+    totalResponseTimeMs: clampNumber(raw.totalResponseTimeMs, 0, Number.MAX_SAFE_INTEGER, 0),
+    totalInputTokens: clampNumber(raw.totalInputTokens, 0, Number.MAX_SAFE_INTEGER, 0),
+    totalOutputTokens: clampNumber(raw.totalOutputTokens, 0, Number.MAX_SAFE_INTEGER, 0),
+    totalTokens: clampNumber(raw.totalTokens, 0, Number.MAX_SAFE_INTEGER, 0),
+    lastStatus:
+      raw.lastStatus === "operational" ||
+      raw.lastStatus === "degraded" ||
+      raw.lastStatus === "failed" ||
+      raw.lastStatus === "fallback"
+        ? raw.lastStatus
+        : null,
+    lastMessage: typeof raw.lastMessage === "string" ? raw.lastMessage : null,
+    lastResponseTimeMs:
+      typeof raw.lastResponseTimeMs === "number" && Number.isFinite(raw.lastResponseTimeMs)
+        ? Math.max(0, raw.lastResponseTimeMs)
+        : null,
+    lastUsedAt:
+      typeof raw.lastUsedAt === "number" && Number.isFinite(raw.lastUsedAt)
+        ? Math.max(0, raw.lastUsedAt)
+        : null,
+    lastAcceptedAt:
+      typeof raw.lastAcceptedAt === "number" && Number.isFinite(raw.lastAcceptedAt)
+        ? Math.max(0, raw.lastAcceptedAt)
+        : null,
+  };
+}
+
+function migrateTerminalInputSuggestionLastTest(value: unknown): TerminalInputSuggestionModelTestResult | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.status !== "operational" && raw.status !== "degraded" && raw.status !== "failed") return null;
+  if (typeof raw.success !== "boolean" || typeof raw.message !== "string") return null;
+  return {
+    status: raw.status,
+    success: raw.success,
+    message: raw.message,
+    responseTimeMs:
+      typeof raw.responseTimeMs === "number" && Number.isFinite(raw.responseTimeMs)
+        ? Math.max(0, raw.responseTimeMs)
+        : undefined,
+    httpStatus:
+      typeof raw.httpStatus === "number" && Number.isFinite(raw.httpStatus)
+        ? Math.max(0, Math.round(raw.httpStatus))
+        : undefined,
+    testedAt:
+      typeof raw.testedAt === "number" && Number.isFinite(raw.testedAt)
+        ? Math.max(0, raw.testedAt)
+        : Math.floor(Date.now() / 1000),
+  };
+}
+
 export function migrateTerminalBackground(value: unknown): TerminalBackgroundSettings {
   const defaults = DEFAULTS.terminalBackground;
   if (typeof value !== "object" || value === null) {
@@ -769,6 +855,33 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         ? entries.terminalInputSuggestionsEnabled
         : DEFAULTS.terminalInputSuggestionsEnabled;
     entries.terminalInputSuggestionProvider = migrateTerminalInputSuggestionProvider(entries.terminalInputSuggestionProvider);
+    entries.terminalInputSuggestionLlmEnabled =
+      typeof entries.terminalInputSuggestionLlmEnabled === "boolean"
+        ? entries.terminalInputSuggestionLlmEnabled
+        : entries.terminalInputSuggestionProvider === "ai";
+    entries.terminalInputSuggestionProvider = entries.terminalInputSuggestionLlmEnabled ? "ai" : "local";
+    entries.terminalInputSuggestionBaseUrl =
+      typeof entries.terminalInputSuggestionBaseUrl === "string"
+        ? entries.terminalInputSuggestionBaseUrl
+        : DEFAULTS.terminalInputSuggestionBaseUrl;
+    entries.terminalInputSuggestionApiKey =
+      typeof entries.terminalInputSuggestionApiKey === "string"
+        ? entries.terminalInputSuggestionApiKey
+        : DEFAULTS.terminalInputSuggestionApiKey;
+    entries.terminalInputSuggestionModel =
+      typeof entries.terminalInputSuggestionModel === "string" && entries.terminalInputSuggestionModel.trim()
+        ? entries.terminalInputSuggestionModel
+        : DEFAULTS.terminalInputSuggestionModel;
+    entries.terminalInputSuggestionUseBuiltinPrompt =
+      typeof entries.terminalInputSuggestionUseBuiltinPrompt === "boolean"
+        ? entries.terminalInputSuggestionUseBuiltinPrompt
+        : DEFAULTS.terminalInputSuggestionUseBuiltinPrompt;
+    entries.terminalInputSuggestionCustomPrompt =
+      typeof entries.terminalInputSuggestionCustomPrompt === "string"
+        ? entries.terminalInputSuggestionCustomPrompt
+        : DEFAULTS.terminalInputSuggestionCustomPrompt;
+    entries.terminalInputSuggestionUsage = migrateTerminalInputSuggestionUsage(entries.terminalInputSuggestionUsage);
+    entries.terminalInputSuggestionLastTest = migrateTerminalInputSuggestionLastTest(entries.terminalInputSuggestionLastTest);
 
     entries.hookPopupNotificationsEnabled =
       typeof entries.hookPopupNotificationsEnabled === "boolean"

@@ -728,7 +728,6 @@ export function HookSettingsPage() {
     void updateSetting("systemNotificationEvents", update);
   };
   const notifyState = (events: HookEventType[]) => events.every((e) => systemNotificationEvents[e]);
-
   return (
     <Stack gap="md">
       <section className="ui-surface-card rounded-2xl border border-border p-4">
