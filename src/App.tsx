@@ -386,7 +386,6 @@ function App() {
   const resolvedTheme = useSettingsStore((s) => s.resolvedTheme);
   const lightThemePalette = useSettingsStore((s) => s.lightThemePalette);
   const darkThemePalette = useSettingsStore((s) => s.darkThemePalette);
-  const terminalThemeMode = useSettingsStore((s) => s.terminalThemeMode);
   const terminalThemeName = useSettingsStore((s) => s.terminalThemeName);
   const uiFontFamily = useSettingsStore((s) => s.uiFontFamily);
   const uiFontSize = useSettingsStore((s) => s.uiFontSize);
@@ -716,9 +715,8 @@ function App() {
 
   useEffect(() => {
     const root = document.documentElement.style;
-    const effectiveTerminalThemeName = terminalThemeMode === "follow-app" ? "auto" : terminalThemeName;
     const terminalTheme = getTerminalTheme(
-      effectiveTerminalThemeName,
+      terminalThemeName,
       resolvedTheme,
       lightThemePalette,
       darkThemePalette
@@ -774,7 +772,6 @@ function App() {
     darkThemePalette,
     lightThemePalette,
     resolvedTheme,
-    terminalThemeMode,
     terminalThemeName,
   ]);
 

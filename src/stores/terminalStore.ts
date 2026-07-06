@@ -649,8 +649,7 @@ function isLightHexColor(value: string | undefined): boolean {
 
 function isCurrentTerminalBackgroundLight(): boolean {
   const settings = useSettingsStore.getState();
-  const themeName = settings.terminalThemeMode === "follow-app" ? "auto" : settings.terminalThemeName;
-  const theme = getTerminalTheme(themeName, settings.resolvedTheme, settings.lightThemePalette, settings.darkThemePalette);
+  const theme = getTerminalTheme(settings.terminalThemeName, settings.resolvedTheme, settings.lightThemePalette, settings.darkThemePalette);
   return isLightHexColor(theme.background);
 }
 

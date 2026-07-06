@@ -1633,7 +1633,6 @@ export function TerminalTabs({
   const fontSize = useSettingsStore((s) => s.fontSize);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
   const resolvedTheme = useSettingsStore((s) => s.resolvedTheme);
-  const terminalThemeMode = useSettingsStore((s) => s.terminalThemeMode);
   const terminalThemeName = useSettingsStore((s) => s.terminalThemeName);
   const lightThemePalette = useSettingsStore((s) => s.lightThemePalette);
   const darkThemePalette = useSettingsStore((s) => s.darkThemePalette);
@@ -1754,10 +1753,9 @@ export function TerminalTabs({
     () => activeDragSessionId ? sessions.find((session) => session.id === activeDragSessionId) ?? null : null,
     [activeDragSessionId, sessions]
   );
-  const effectiveTerminalThemeName = terminalThemeMode === "follow-app" ? "auto" : terminalThemeName;
   const terminalTheme = useMemo(
-    () => getTerminalTheme(effectiveTerminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette),
-    [darkThemePalette, effectiveTerminalThemeName, lightThemePalette, resolvedTheme]
+    () => getTerminalTheme(terminalThemeName, resolvedTheme, lightThemePalette, darkThemePalette),
+    [darkThemePalette, lightThemePalette, resolvedTheme, terminalThemeName]
   );
   const terminalThemeBackground = terminalTheme.background ?? (resolvedTheme === "dark" ? "#0c0e10" : "#ffffff");
   const terminalThemeForeground = terminalTheme.foreground ?? (resolvedTheme === "dark" ? "#f8fafc" : "#1e293b");
@@ -2564,7 +2562,7 @@ export function TerminalTabs({
       fontSize={fontSize}
       fontFamily={fontFamily}
       resolvedTheme={resolvedTheme}
-      terminalThemeName={effectiveTerminalThemeName}
+      terminalThemeName={terminalThemeName}
       terminalThemeBackground={terminalThemeBackground}
       lightThemePalette={lightThemePalette}
       darkThemePalette={darkThemePalette}
@@ -2598,7 +2596,6 @@ export function TerminalTabs({
     allPanes,
     darkThemePalette,
     editingSessionId,
-    effectiveTerminalThemeName,
     fontFamily,
     fontSize,
     handleActivateSession,
@@ -2622,6 +2619,7 @@ export function TerminalTabs({
     terminalThemeBackground,
     terminalBackgroundEnabled,
     terminalBackgroundImagePath,
+    terminalThemeName,
     unsplitTerminal,
   ]);
 
@@ -2661,7 +2659,7 @@ export function TerminalTabs({
         )}
         <div
           className="ui-terminal-well absolute inset-0 min-h-0 flex"
-          data-terminal-mode={terminalThemeMode}
+          data-terminal-mode="independent"
           style={{ display: historyActive ? "none" : "flex" }}
         >
           <div className="flex-1 min-h-0 min-w-0">
