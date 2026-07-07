@@ -4017,17 +4017,6 @@
   touch-action: none;
 }
 
-.ui-terminal-font-zoom-group {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-  margin-top: auto;
-  padding-top: 6px;
-  border-top: 1px solid color-mix(in srgb, var(--term-panel-border, currentColor) 34%, transparent);
-}
-
 .ui-terminal-pane-chrome .ui-terminal-action-sidebar .ui-toolbar-button,
 .ui-terminal-pane-chrome .ui-terminal-action-sidebar .ui-icon-action,
 .ui-terminal-action-sidebar .ui-toolbar-button,

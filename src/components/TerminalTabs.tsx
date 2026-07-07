@@ -19,7 +19,7 @@ import {
 import { SortableContext, arrayMove, horizontalListSortingStrategy, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useTerminalStore, type SplitTerminalOptions, type TabNotificationState } from "../stores/terminalStore";
-import { TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, useSettingsStore } from "../stores/settingsStore";
+import { useSettingsStore } from "../stores/settingsStore";
 import { useWorktreeStore } from "../stores/worktreeStore";
 import { useProjectStore } from "../stores/projectStore";
 import { isProjectFileDirty, useFileExplorerStore } from "../stores/fileExplorerStore";
@@ -54,7 +54,7 @@ import { openWindowsTerminal } from "../lib/externalTerminal";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { normalizeDirectCodexStartupCommand, resolveProjectStartupCommand } from "../lib/projectStartupCommand";
 import { parseProjectEnvVars } from "../lib/providerSwitching";
-import { Activity, Terminal, Plus, ListClockIcon, X, Copy, Maximize2, Minimize2, ChevronDown, ChevronRight, BarChart3, GitBranch, Folder, Check, Minus, RefreshCw } from "./icons";
+import { Activity, Terminal, Plus, ListClockIcon, X, Copy, Maximize2, Minimize2, ChevronDown, ChevronRight, BarChart3, GitBranch, Folder, Check } from "./icons";
 import { WorktreeIcon } from "./WorktreeIcon";
 import { VendorIcon, inferVendor, type VendorKey } from "./VendorIcon";
 import { EmptyState } from "./ui/EmptyState";
@@ -2554,24 +2554,6 @@ export function TerminalTabs({
     onToggleFullscreen?.();
   }, [activeFullscreenPaneId, onToggleFullscreen]);
 
-  const updateTerminalFontSize = useCallback((next: number) => {
-    const clamped = Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, next));
-    if (clamped === fontSize) return;
-    void updateSettings("fontSize", clamped);
-  }, [fontSize, updateSettings]);
-
-  const handleDecreaseTerminalFontSize = useCallback(() => {
-    updateTerminalFontSize(fontSize - 1);
-  }, [fontSize, updateTerminalFontSize]);
-
-  const handleResetTerminalFontSize = useCallback(() => {
-    updateTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
-  }, [updateTerminalFontSize]);
-
-  const handleIncreaseTerminalFontSize = useCallback(() => {
-    updateTerminalFontSize(fontSize + 1);
-  }, [fontSize, updateTerminalFontSize]);
-
   const renderToolbarActions = useCallback(() => {
     const buttonMap: Record<string, ReactNode> = {
       new: (
@@ -2706,38 +2688,6 @@ export function TerminalTabs({
               </SortableToolbarButton>
             ))}
           </SortableContext>
-          <div className="ui-terminal-font-zoom-group" role="group" aria-label={t("terminal.toolbar.fontSizeGroup")}>
-            <button
-              type="button"
-              onClick={handleDecreaseTerminalFontSize}
-              disabled={fontSize <= TERMINAL_FONT_SIZE_MIN}
-              className="ui-focus-ring ui-icon-action ui-action-font-size"
-              title={t("terminal.toolbar.decreaseFontSize")}
-              aria-label={t("terminal.toolbar.decreaseFontSize")}
-            >
-              <Minus size={13} strokeWidth={2} />
-            </button>
-            <button
-              type="button"
-              onClick={handleResetTerminalFontSize}
-              disabled={fontSize === TERMINAL_FONT_SIZE_DEFAULT}
-              className="ui-focus-ring ui-icon-action ui-action-font-size-reset"
-              title={t("terminal.toolbar.resetFontSize")}
-              aria-label={t("terminal.toolbar.resetFontSize")}
-            >
-              <RefreshCw size={12} strokeWidth={1.9} />
-            </button>
-            <button
-              type="button"
-              onClick={handleIncreaseTerminalFontSize}
-              disabled={fontSize >= TERMINAL_FONT_SIZE_MAX}
-              className="ui-focus-ring ui-icon-action ui-action-font-size"
-              title={t("terminal.toolbar.increaseFontSize")}
-              aria-label={t("terminal.toolbar.increaseFontSize")}
-            >
-              <Plus size={13} strokeWidth={2} />
-            </button>
-          </div>
         </nav>
         <DragOverlay dropAnimation={null}>
           {activeToolbarDragId && buttonMap[activeToolbarDragId] ? (
@@ -2761,9 +2711,6 @@ export function TerminalTabs({
     handleToggleGlobalFullscreen,
     handleToggleReplayPanel,
     handleToggleStatsPanel,
-    handleDecreaseTerminalFontSize,
-    handleIncreaseTerminalFontSize,
-    handleResetTerminalFontSize,
     handleToolbarDragCancel,
     handleToolbarDragEnd,
     handleToolbarDragStart,
@@ -2774,7 +2721,6 @@ export function TerminalTabs({
     sidePanelMerged,
     statsPanelActive,
     t,
-    fontSize,
     terminalToolbarOrder,
     terminalToolbarVisibility,
     terminalActionSidebarStyle,
