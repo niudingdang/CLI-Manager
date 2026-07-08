@@ -265,7 +265,7 @@ export function ProjectTree({
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const treeContainerRef = useRef<HTMLDivElement | null>(null);
-  const suppressClickAfterDragRef = useRef(false);
+  const suppressClickAfterDragUntilRef = useRef(0);
   const searchActive = searchOpen && searchQuery.trim().length > 0;
   const filteredTree = useMemo(
     () => (searchActive ? filterTreeNodes(tree, searchQuery) : tree),
@@ -689,11 +689,14 @@ export function ProjectTree({
         sensors={sensors}
         collisionDetection={treeCollisionDetection}
         onDragStart={(event: DragStartEvent) => {
-          suppressClickAfterDragRef.current = true;
           setActiveId(String(event.active.id));
         }}
-        onDragCancel={() => setActiveId(null)}
+        onDragCancel={() => {
+          suppressClickAfterDragUntilRef.current = performance.now() + 250;
+          setActiveId(null);
+        }}
         onDragEnd={(event) => {
+          suppressClickAfterDragUntilRef.current = performance.now() + 250;
           setActiveId(null);
           actions.onDragEnd(event);
         }}
@@ -711,8 +714,8 @@ export function ProjectTree({
             className={`${shouldFillTreeArea ? "min-h-full" : ""} outline-none`}
             onKeyDown={handleTreeKeyDown}
             onClickCapture={(event) => {
-              if (!suppressClickAfterDragRef.current) return;
-              suppressClickAfterDragRef.current = false;
+              if (performance.now() > suppressClickAfterDragUntilRef.current) return;
+              suppressClickAfterDragUntilRef.current = 0;
               event.preventDefault();
               event.stopPropagation();
             }}
