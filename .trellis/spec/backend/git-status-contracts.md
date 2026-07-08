@@ -249,3 +249,91 @@ try {
   }
 }
 ```
+
+---
+
+## Untracked File Delete Command Contract（V1.2.6）
+
+### 1. Scope / Trigger
+
+- Trigger: Git 变更面板允许从右键菜单物理删除未跟踪文件。
+- Target: `src-tauri/src/commands/git.rs` 的 `git_delete_untracked_paths`；前端只能通过 Tauri command 调用，不拼接 shell 命令。
+
+### 2. Signatures
+
+```rust
+#[tauri::command]
+pub async fn git_delete_untracked_paths(
+    project_path: String,
+    paths: Vec<String>,
+) -> Result<(), String>;
+```
+
+```typescript
+await invoke("git_delete_untracked_paths", {
+  projectPath,
+  paths,
+});
+```
+
+### 3. Contracts
+
+- `project_path` 必须是当前 Git 面板生效仓库路径：根仓库或已选择的子仓库。
+- `paths` 必须是 repo-relative 路径数组，由 Git 变更树里的未跟踪文件项产生。
+- 后端必须在删除前重新读取当前 Git 状态，只允许删除状态仍为 `U` / `??` 的文件。
+- 目录菜单不得传任意目录路径；前端应展开为该目录下的未跟踪文件路径数组。
+- 删除后前端必须刷新 Git 变更列表，并从 `selectedUntracked` 中移除已删除路径。
+
+### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|---|---|
+| `paths` empty | No-op success |
+| path empty | `empty_path` |
+| path contains `..` | `path_escape` |
+| path starts with `/` or `\` | `absolute_path` |
+| Windows drive absolute path such as `C:/x` | `absolute_path` |
+| project path missing | `path_not_found` |
+| repo cannot open | `open_repo_failed:*` |
+| path exists but is not currently untracked | `path_not_untracked` |
+| target canonicalizes outside workdir | `path_outside_root` |
+| target is a directory | `untracked_directory_not_supported` |
+| missing path after stale UI | No-op success |
+
+### 5. Good/Base/Bad Cases
+
+- Good: right-click an untracked file, confirm Delete, backend verifies `U` / `??`, removes the file, and the panel refreshes.
+- Good: right-click an untracked directory, confirm Delete, frontend passes only the untracked files under that directory.
+- Base: file was already deleted outside the app before confirm; backend no-ops and refresh removes the stale row.
+- Bad: using `git_discard_file` for untracked files; that command intentionally rejects `U` / `??`.
+- Bad: accepting an arbitrary directory path and recursively deleting it without Git status membership checks.
+
+### 6. Tests Required
+
+- Rust unit test: deleting a repo-relative untracked file removes it from disk.
+- Rust unit test: trying to delete a tracked file returns `path_not_untracked`.
+- Reuse existing validation tests for `validate_repo_relative_path` and `remove_untracked_snapshot_file`.
+- TypeScript: `npx tsc --noEmit` must cover store action, tree props, confirm dialog state, and i18n keys.
+- Rust: `cargo check` must cover Tauri command registration.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+// Do not route untracked deletion through tracked discard semantics.
+await invoke("git_discard_file", {
+  projectPath,
+  filePath,
+  status: "U",
+});
+```
+
+#### Correct
+
+```typescript
+await invoke("git_delete_untracked_paths", {
+  projectPath,
+  paths: [filePath],
+});
+```

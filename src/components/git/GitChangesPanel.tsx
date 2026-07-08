@@ -277,6 +277,7 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     expandAllDirs,
     discardFile,
     discardAll,
+    deleteUntrackedPaths,
     discarding,
     stageFile,
     unstageFile,
@@ -320,6 +321,7 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
   const [selectedFile, setSelectedFile] = useState<{ path: string; name: string; status: string } | null>(null);
   const [confirmAllOpen, setConfirmAllOpen] = useState(false);
   const [discardTarget, setDiscardTarget] = useState<{ path: string; name: string; status: string } | null>(null);
+  const [deleteUntrackedTarget, setDeleteUntrackedTarget] = useState<{ paths: string[]; name: string } | null>(null);
   const [smartCheckoutTarget, setSmartCheckoutTarget] = useState<GitBranchInfo | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
   const [pullMenuOpen, setPullMenuOpen] = useState(false);
@@ -472,6 +474,11 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     setDiscardTarget({ path, name, status });
   };
 
+  const handleRequestDeleteUntracked = (paths: string[], name: string) => {
+    if (paths.length === 0) return;
+    setDeleteUntrackedTarget({ paths, name });
+  };
+
   const allCount = changes.length;
   const modifiedCount = changes.filter((c) => c.status === "M").length;
   const addedCount = changes.filter((c) => c.status === "A" || c.status === "U" || c.status === "??").length;
@@ -539,6 +546,18 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
     void (allStaged ? unstagePaths(paths) : stagePaths(paths)).catch(() => {
       toast.error(t("git.toast.batchStageFailed"));
     });
+  };
+
+  const handleConfirmDeleteUntracked = async () => {
+    if (!deleteUntrackedTarget) return;
+    const target = deleteUntrackedTarget;
+    setDeleteUntrackedTarget(null);
+    try {
+      await deleteUntrackedPaths(target.paths);
+      toast.success(t("git.toast.deleteUntrackedSuccess", { count: target.paths.length }));
+    } catch (err) {
+      toast.error(t("git.toast.deleteUntrackedFailed"), { description: String(err) });
+    }
   };
 
   const handleCommit = async () => {
@@ -969,6 +988,7 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
                   onFileClick={handleFileClick}
                   onOpenSourceFile={handleOpenSourceFile}
                   onRequestDiscard={handleRequestDiscard}
+                  onRequestDeleteUntracked={handleRequestDeleteUntracked}
                   onToggleStage={handleToggleStage}
                   onToggleStagePaths={handleToggleStagePaths}
                 />
@@ -987,6 +1007,7 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
                   onFileClick={handleFileClick}
                   onOpenSourceFile={handleOpenSourceFile}
                   onRequestDiscard={handleRequestDiscard}
+                  onRequestDeleteUntracked={handleRequestDeleteUntracked}
                   onToggleStage={handleToggleStage}
                   onToggleStagePaths={handleToggleStagePaths}
                 />
@@ -1245,6 +1266,17 @@ export function GitChangesPanel({ open, projectPath, visible = true, embedded = 
           setDiscardTarget(null);
         }}
         onClose={() => setDiscardTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={!!deleteUntrackedTarget}
+        title={t("git.confirm.deleteUntrackedTitle")}
+        message={deleteUntrackedTarget ? t("git.confirm.deleteUntrackedMessage", { name: deleteUntrackedTarget.name, count: deleteUntrackedTarget.paths.length }) : undefined}
+        confirmText={t("git.confirm.deleteUntracked")}
+        cancelText={t("common.cancel")}
+        danger
+        onConfirm={() => void handleConfirmDeleteUntracked()}
+        onClose={() => setDeleteUntrackedTarget(null)}
       />
 
       {/* Smart Checkout：用户确认后才 stash 并切换，避免自动移动未提交改动。 */}

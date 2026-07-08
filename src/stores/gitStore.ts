@@ -61,6 +61,7 @@ interface GitStore {
   setActiveRepo: (absolutePath: string | null) => void;
   discardFile: (filePath: string, status: string) => Promise<void>;
   discardAll: () => Promise<void>;
+  deleteUntrackedPaths: (paths: string[]) => Promise<void>;
   revertHunk: (diffText: string, hunkIndex: number) => Promise<void>;
   revertLines: (diffText: string, selectedLines: { side: "old" | "new"; lineNumber: number }[]) => Promise<void>;
   stageFile: (filePath: string) => Promise<void>;
@@ -442,6 +443,31 @@ export const useGitStore = create<GitStore>((set, get) => ({
     } finally {
       // 无论成功或部分失败都刷新，反映真实状态。
       await get().fetchChanges(currentProjectPath, true);
+      set({ discarding: false });
+    }
+  },
+
+  deleteUntrackedPaths: async (paths: string[]) => {
+    const { currentProjectPath } = get();
+    const repoPath = effectiveRepoPath();
+    if (!currentProjectPath || !repoPath || paths.length === 0) return;
+    set({ discarding: true, error: null });
+    try {
+      await invoke("git_delete_untracked_paths", { projectPath: repoPath, paths });
+      set((state) => {
+        const selectedUntracked = new Set(state.selectedUntracked);
+        for (const path of paths) {
+          selectedUntracked.delete(path);
+        }
+        return { selectedUntracked };
+      });
+      await get().fetchChanges(currentProjectPath, true);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[GitStore] 删除未跟踪文件失败:`, err);
+      set({ error: errorMsg });
+      throw err;
+    } finally {
       set({ discarding: false });
     }
   },

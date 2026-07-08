@@ -1,5 +1,6 @@
 use git2::{build::CheckoutBuilder, DiffOptions, Repository, ResetType, StatusOptions};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use tauri::{AppHandle, State};
 
@@ -1324,6 +1325,10 @@ fn validate_repo_relative_path(p: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_untracked_status(status: &str) -> bool {
+    matches!(status, "U" | "??")
+}
+
 /// 回滚（丢弃）单个**已跟踪**文件的未提交改动，恢复到 HEAD。
 ///
 /// 破坏性、不可逆操作（未提交改动无法通过 git 找回），调用方须二次确认。
@@ -1392,6 +1397,56 @@ pub async fn git_discard_file(
                 Ok(())
             }
         }
+    })
+    .await
+    .map_err(|e| format!("task_failed: {e}"))?
+}
+
+/// 删除未跟踪文件。只允许删除当前 Git 状态仍为未跟踪的 repo 内文件。
+///
+/// 破坏性、不可逆操作。调用方必须二次确认。
+#[tauri::command]
+pub async fn git_delete_untracked_paths(
+    project_path: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    for path in &paths {
+        validate_repo_relative_path(path)?;
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let effective_project_path = effective_git_project_path(&project_path);
+        let path = Path::new(&effective_project_path);
+        if !crate::wsl::is_wsl_config_dir(&project_path) && !path.exists() {
+            return Err("path_not_found".to_string());
+        }
+
+        let repo = open_git_repo(path).map_err(|e| format!("open_repo_failed: {e}"))?;
+        let workdir = repo.workdir().ok_or("bare_repo_not_supported")?;
+        let current_changes = collect_git_changes_from_repo(&repo)?;
+        let current_untracked: HashSet<&str> = current_changes
+            .iter()
+            .filter(|change| is_untracked_status(&change.status))
+            .map(|change| change.path.as_str())
+            .collect();
+
+        for target in &paths {
+            if current_untracked.contains(target.as_str()) {
+                remove_untracked_snapshot_file(workdir, target)?;
+                continue;
+            }
+
+            if !workdir.join(target).exists() {
+                continue;
+            }
+
+            return Err("path_not_untracked".to_string());
+        }
+
+        Ok(())
     })
     .await
     .map_err(|e| format!("task_failed: {e}"))?
@@ -2587,11 +2642,11 @@ pub async fn git_watch_stop(bridge: State<'_, GitWatcherBridge>) -> Result<(), S
 mod tests {
     use super::{
         build_reverse_hunk_patch, build_reverse_lines_patch, build_worktree_snapshot,
-        build_wsl_git_command_args, collect_git_changes_from_repo, git_fork_worktree_snapshot,
-        git_restore_worktree_snapshot, is_nested_repo_entry, is_no_stash_created,
-        parse_wsl_git_status, parse_wsl_numstat, remove_untracked_snapshot_file,
-        scan_git_repository_paths, should_skip_diff_line_stats, validate_branch_name,
-        validate_repo_relative_path, validate_snapshot_branch_name,
+        build_wsl_git_command_args, collect_git_changes_from_repo, git_delete_untracked_paths,
+        git_fork_worktree_snapshot, git_restore_worktree_snapshot, is_nested_repo_entry,
+        is_no_stash_created, parse_wsl_git_status, parse_wsl_numstat,
+        remove_untracked_snapshot_file, scan_git_repository_paths, should_skip_diff_line_stats,
+        validate_branch_name, validate_repo_relative_path, validate_snapshot_branch_name,
         GIT_DIFF_LINE_STATS_STATUS_LIMIT,
     };
     use git2::{IndexAddOption, Repository, Signature};
@@ -2888,6 +2943,30 @@ mod tests {
 
         assert!(!nested.exists());
         assert!(!temp.path().join("tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn git_delete_untracked_paths_removes_untracked_file() {
+        let (temp, repo_path) = init_temp_repo();
+        let untracked = temp.path().join("note.txt");
+        fs::write(&untracked, "draft").unwrap();
+
+        git_delete_untracked_paths(repo_path, vec!["note.txt".to_string()])
+            .await
+            .unwrap();
+
+        assert!(!untracked.exists());
+    }
+
+    #[tokio::test]
+    async fn git_delete_untracked_paths_rejects_tracked_file() {
+        let (_temp, repo_path) = init_temp_repo();
+
+        let err = git_delete_untracked_paths(repo_path, vec!["tracked.txt".to_string()])
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "path_not_untracked");
     }
 
     #[test]

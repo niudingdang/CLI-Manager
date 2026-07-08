@@ -1,4 +1,4 @@
-import { ChevronRight, Undo2, Check, Minus, Copy, FileCode } from "../icons";
+import { ChevronRight, Undo2, Check, Minus, Copy, FileCode, Trash2 } from "../icons";
 import type { GitTreeNode, GitFileChange, Project } from "../../lib/types";
 import { GitStatusIcon } from "./GitStatusIcon";
 import { useGitStore } from "../../stores/gitStore";
@@ -47,11 +47,12 @@ interface GitTreeNodeProps {
   onFileClick: (filePath: string) => void;
   onOpenSourceFile: (filePath: string, status: string) => void;
   onRequestDiscard: (path: string, name: string, status: string) => void;
+  onRequestDeleteUntracked: (paths: string[], name: string) => void;
   onToggleStage: (filePath: string, staged: boolean) => void;
   onToggleStagePaths: (paths: string[], allStaged: boolean) => void;
 }
 
-export function GitTreeNodeComponent({ project, node, depth, treeId, onFileClick, onOpenSourceFile, onRequestDiscard, onToggleStage, onToggleStagePaths }: GitTreeNodeProps) {
+export function GitTreeNodeComponent({ project, node, depth, treeId, onFileClick, onOpenSourceFile, onRequestDiscard, onRequestDeleteUntracked, onToggleStage, onToggleStagePaths }: GitTreeNodeProps) {
   const { t } = useI18n();
   const { collapsedDirs, toggleDir, selectedUntracked, toggleUntrackedSelection, deselectedAdded, toggleAddedDeselection, setAddedDeselection } = useGitStore();
   // 折叠 key 按分区前缀隔离：已跟踪树与未跟踪树同名目录互不影响。
@@ -203,16 +204,26 @@ export function GitTreeNodeComponent({ project, node, depth, treeId, onFileClick
             {t("files.menu.copyAiPath")}
           </ContextMenuItem>
           {isUntracked ? (
-            // 未跟踪文件右键：真实「加入跟踪（git add）」立即操作（与复选框的「选中」区分开）。
-            <ContextMenuItem
-              className="flex items-center gap-2"
-              onSelect={() => {
-                if (node.change) onToggleStage(node.path, false);
-              }}
-            >
-              <Check size={12} />
-              {t("git.tree.trackFile")}
-            </ContextMenuItem>
+            <>
+              {/* 未跟踪文件右键：真实「加入跟踪（git add）」立即操作（与复选框的「选中」区分开）。 */}
+              <ContextMenuItem
+                className="flex items-center gap-2"
+                onSelect={() => {
+                  if (node.change) onToggleStage(node.path, false);
+                }}
+              >
+                <Check size={12} />
+                {t("git.tree.trackFile")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                danger
+                className="flex items-center gap-2"
+                onSelect={() => onRequestDeleteUntracked([node.path], node.name)}
+              >
+                <Trash2 size={12} />
+                {t("git.tree.deleteUntracked")}
+              </ContextMenuItem>
+            </>
           ) : (
             <ContextMenuItem
               className="flex items-center gap-2"
@@ -252,7 +263,7 @@ export function GitTreeNodeComponent({ project, node, depth, treeId, onFileClick
   const folderIconDataUri = getMaterialFolderIcon(node.name, !displayCollapsed);
   const dirFiles = collectFileChanges(displayNode);
   // 目录下全部为未跟踪文件时，复选框走「选中」态（与文件行一致）。
-  const dirAllUntracked =
+          const dirAllUntracked =
     dirFiles.length > 0 && dirFiles.every((f) => f.status === "U" || f.status === "??");
   const dirSelectedCount = dirAllUntracked
     ? dirFiles.filter((f) => selectedUntracked.has(f.path)).length
@@ -286,6 +297,8 @@ export function GitTreeNodeComponent({ project, node, depth, treeId, onFileClick
       setAddedDeselection(dirAddedFiles.map((f) => f.path), !makeChecked);
     }
   };
+  const directoryLabel = suffixParts.length > 0 ? `${node.name}/${suffixParts.join("/")}` : node.name;
+  const dirFilePaths = dirFiles.map((f) => f.path);
 
   return (
     <div>
@@ -379,13 +392,23 @@ export function GitTreeNodeComponent({ project, node, depth, treeId, onFileClick
                 ? t("git.tree.uncheckDirectory")
                 : t("git.tree.checkDirectory")}
           </ContextMenuItem>
+          {dirAllUntracked && (
+            <ContextMenuItem
+              danger
+              className="flex items-center gap-2"
+              onSelect={() => onRequestDeleteUntracked(dirFilePaths, directoryLabel)}
+            >
+              <Trash2 size={12} />
+              {t("git.tree.deleteUntrackedDirectory")}
+            </ContextMenuItem>
+          )}
         </ContextMenuContent>
       </ContextMenu>
 
       {!displayCollapsed && hasChildren && (
         <div>
           {displayNode.children!.map((child) => (
-            <GitTreeNodeComponent key={child.path} project={project} node={child} depth={depth + 1} treeId={treeId} onFileClick={onFileClick} onOpenSourceFile={onOpenSourceFile} onRequestDiscard={onRequestDiscard} onToggleStage={onToggleStage} onToggleStagePaths={onToggleStagePaths} />
+            <GitTreeNodeComponent key={child.path} project={project} node={child} depth={depth + 1} treeId={treeId} onFileClick={onFileClick} onOpenSourceFile={onOpenSourceFile} onRequestDiscard={onRequestDiscard} onRequestDeleteUntracked={onRequestDeleteUntracked} onToggleStage={onToggleStage} onToggleStagePaths={onToggleStagePaths} />
           ))}
         </div>
       )}

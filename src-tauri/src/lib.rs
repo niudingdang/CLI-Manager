@@ -556,6 +556,7 @@ pub fn run() {
             commands::git::git_get_worktree_snapshot,
             commands::git::git_restore_worktree_snapshot,
             commands::git::git_discard_file,
+            commands::git::git_delete_untracked_paths,
             commands::git::git_revert_hunk,
             commands::git::git_revert_lines,
             commands::git::git_stage_file,
