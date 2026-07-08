@@ -3,6 +3,7 @@
 mod app_paths;
 mod claude_hook;
 mod commands;
+mod conpty_sideload;
 mod file_watcher;
 mod git_watcher;
 pub mod hook_client;
@@ -413,6 +414,7 @@ pub fn run() {
             if let Err(err) = app_paths::migrate_legacy_app_files(app.handle()) {
                 log::warn!("CLI-Manager data migration skipped: {err}");
             }
+            conpty_sideload::initialize(app.handle());
             // 保留应用自身调试日志，但压掉 sqlx 的逐条 SQL 输出。
             log::set_max_level(log_level);
             app.manage(claude_hook::ClaudeHookBridge::start(app.handle().clone()));
